@@ -546,6 +546,7 @@
         <label>
           Mode
           <select id="chunkMode">
+            <option value="smart">Smart</option>
             <option value="sentence">Sentence</option>
             <option value="paragraph">Paragraph</option>
             <option value="line">Line</option>
@@ -561,6 +562,14 @@
             <input id="maxChars" type="number" min="80" max="1400" step="20" value="360" />
           </label>
         </div>
+        <label>
+          Punctuation pause
+          <select id="pauseMode">
+            <option value="light">Light</option>
+            <option value="strong">Strong</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
         <label class="check">
           <input id="autoScroll" type="checkbox" checked />
           Auto-scroll
@@ -786,6 +795,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
         mode: $("chunkMode").value,
         minChars: Number($("minChars").value),
         maxChars: Number($("maxChars").value),
+        pauseMode: $("pauseMode").value,
         autoScroll: $("autoScroll").checked,
         prefetch: $("prefetch").checked,
         cacheAudio: $("cacheAudio").checked
@@ -801,6 +811,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       if (data.mode) $("chunkMode").value = data.mode;
       if (data.minChars !== undefined) $("minChars").value = data.minChars;
       if (data.maxChars) $("maxChars").value = data.maxChars;
+      if (data.pauseMode) $("pauseMode").value = data.pauseMode;
       if (data.autoScroll !== undefined) $("autoScroll").checked = data.autoScroll;
       if (data.prefetch !== undefined) $("prefetch").checked = data.prefetch;
       if (data.cacheAudio !== undefined) $("cacheAudio").checked = data.cacheAudio;
@@ -849,9 +860,9 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       if (!clean) return [];
       if ("Segmenter" in Intl) {
         const segmenter = new Intl.Segmenter("en", { granularity: "sentence" });
-        return Array.from(segmenter.segment(clean), (part) => part.segment.trim()).filter(Boolean);
+        return mergeOrphanSentenceUnits(Array.from(segmenter.segment(clean), (part) => part.segment.trim()).filter(Boolean));
       }
-      return clean.match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g)?.map((x) => x.trim()).filter(Boolean) || [clean];
+      return mergeOrphanSentenceUnits(clean.match(/[^.!?]+[.!?]+["'\u201d\u2019)\]]*|[^.!?]+$/g)?.map((x) => x.trim()).filter(Boolean) || [clean]);
     }
 
     function paragraphUnits(text) {
@@ -862,30 +873,97 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       return text.replace(/\r/g, "").split(/\n+/).map((x) => x.replace(/\s+/g, " ").trim()).filter(Boolean);
     }
 
+    function chunkBounds(config) {
+      let maxChars = Math.max(80, Math.min(1400, Number(config.maxChars) || 360));
+      let minChars = Math.max(0, Math.min(Number(config.minChars) || 0, maxChars - 20));
+      if (config.engine === "neutts") {
+        maxChars = Math.min(maxChars, 220);
+        minChars = Math.min(minChars, 80);
+      }
+      if (config.mode === "smart") {
+        if (config.engine === "neutts") {
+          maxChars = Math.min(maxChars, 170);
+          minChars = Math.min(minChars, 60);
+        } else {
+          maxChars = Math.min(maxChars, 260);
+          minChars = Math.min(minChars, 100);
+        }
+      }
+      return { minChars, maxChars };
+    }
+
+    function mergeOrphanSentenceUnits(units) {
+      const merged = [];
+      for (let index = 0; index < units.length; index += 1) {
+        const unit = units[index].trim();
+        if (!unit) continue;
+        if (/^[\u201c"']+$/.test(unit) && units[index + 1]) {
+          units[index + 1] = `${unit}${units[index + 1]}`;
+        } else if (/^[.!?\u2026]+["'\u201d\u2019)\]]*$/.test(unit) && merged.length) {
+          merged[merged.length - 1] = `${merged[merged.length - 1]}${unit}`;
+        } else if (/^["'\u201d\u2019)\]]+$/.test(unit) && merged.length) {
+          merged[merged.length - 1] = `${merged[merged.length - 1]}${unit}`;
+        } else {
+          merged.push(unit);
+        }
+      }
+      return merged;
+    }
+
+    function terminalPunctuation(text) {
+      return /[.!?]["'\u201d\u2019)\]]*$/.test(text.trim());
+    }
+
+    function bestSplitPoint(text, maxChars) {
+      const minPoint = Math.min(Math.max(32, Math.floor(maxChars * 0.35)), maxChars - 1);
+      const window = text.slice(0, maxChars + 1);
+      const patterns = [
+        /[.!?]["'\u201d\u2019)\]]?\s+/g,
+        /[,;:]["'\u201d\u2019)\]]?\s+/g,
+        /[\u2014\u2013]\s+/g
+      ];
+
+      for (const pattern of patterns) {
+        let best = -1;
+        for (const match of window.matchAll(pattern)) {
+          const point = match.index + match[0].length;
+          if (point >= minPoint && point <= maxChars) best = point;
+        }
+        if (best > 0) return best;
+      }
+
+      const space = window.lastIndexOf(" ");
+      if (space >= minPoint) return space + 1;
+      return maxChars;
+    }
+
     function splitLongUnit(unit, maxChars) {
       if (unit.length <= maxChars) return [unit];
       const chunks = [];
-      let current = "";
-      for (const word of unit.split(/\s+/)) {
-        const candidate = current ? `${current} ${word}` : word;
-        if (candidate.length <= maxChars || !current) {
-          current = candidate;
-        } else {
-          chunks.push(current);
-          current = word;
-        }
+      let remaining = unit.trim();
+      while (remaining.length > maxChars) {
+        const point = bestSplitPoint(remaining, maxChars);
+        chunks.push(remaining.slice(0, point).trim());
+        remaining = remaining.slice(point).trim();
       }
-      if (current) chunks.push(current);
+      if (remaining) chunks.push(remaining);
       return chunks;
     }
 
-    function unitsForMode(text, mode) {
+    function smartUnits(text, maxChars) {
+      return paragraphUnits(text).flatMap((paragraph) => (
+        sentenceUnits(paragraph).flatMap((sentence) => splitLongUnit(sentence, maxChars))
+      ));
+    }
+
+    function unitsForMode(text, mode, maxChars) {
+      if (mode === "smart") return smartUnits(text, maxChars);
       if (mode === "paragraph") return paragraphUnits(text);
       if (mode === "line") return lineUnits(text);
       return sentenceUnits(text);
     }
 
-    function packUnits(units, minChars, maxChars) {
+    function packUnits(units, minChars, maxChars, mode = "sentence") {
       const chunks = [];
       let current = "";
       const normalized = units.flatMap((unit) => splitLongUnit(unit, maxChars));
@@ -893,7 +971,9 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
         const candidate = current ? `${current} ${unit}` : unit;
         if (!current) {
           current = unit;
-        } else if (candidate.length <= maxChars) {
+        } else if (mode === "smart" && current.length < minChars && !terminalPunctuation(current) && candidate.length <= maxChars) {
+          current = candidate;
+        } else if (mode !== "smart" && candidate.length <= maxChars) {
           current = candidate;
         } else if (current.length < minChars) {
           chunks.push(current);
@@ -910,9 +990,9 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
     function buildChunks() {
       savePrefs();
       const config = settings();
-      const minChars = Math.max(0, Math.min(config.minChars || 0, config.maxChars - 20));
-      const units = unitsForMode(sourceText(), config.mode);
-      state.chunks = packUnits(units, minChars, config.maxChars).map((text, index) => ({ id: index, text }));
+      const { minChars, maxChars } = chunkBounds(config);
+      const units = unitsForMode(sourceText(), config.mode, maxChars);
+      state.chunks = packUnits(units, minChars, maxChars, config.mode).map((text, index) => ({ id: index, text }));
       const resumeIndex = state.pendingCurrent ?? state.current;
       state.current = state.chunks.length ? Math.max(0, Math.min(state.chunks.length - 1, resumeIndex >= 0 ? resumeIndex : 0)) : -1;
       state.pendingCurrent = null;
@@ -920,7 +1000,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       state.jump = null;
       renderAll();
       setStatus(state.chunks.length ? "Queue ready" : "No text");
-      log(`${state.chunks.length} chunks built.`);
+      log(`${state.chunks.length} chunks built. Effective max: ${maxChars} chars.`);
       savePrefs();
     }
 
@@ -1066,14 +1146,28 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       return JSON.stringify({
         engine: config.engine,
         text: chunk?.text || "",
+        speechText: speechTextForChunk(chunk?.text || "", config),
         voice: config.voice,
         lang_code: config.lang_code,
-        speed: config.speed
+        speed: config.speed,
+        pauseMode: config.pauseMode
       });
     }
 
     function hasCached(index) {
       return state.cache.has(cacheKey(index));
+    }
+
+    function speechTextForChunk(text, config = settings()) {
+      const mode = config.pauseMode || "light";
+      let output = text.replace(/\s+/g, " ").trim();
+      if (mode === "off") return output;
+
+      const sentenceGap = mode === "strong" ? "\n\n" : "  ";
+      const clauseGap = mode === "strong" ? "   " : "  ";
+      output = output.replace(/([.!?])(["'\u201d\u2019)\]]*)\s+/g, `$1$2${sentenceGap}`);
+      output = output.replace(/([,;:])(["'\u201d\u2019)\]]*)\s+/g, `$1$2${clauseGap}`);
+      return output;
     }
 
     async function ensureAudio(index) {
@@ -1087,15 +1181,16 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
 
       const started = performance.now();
       const config = settings();
+      const speechText = speechTextForChunk(chunk.text, config);
       const response = await fetch(apiUrl("/api/speak"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          text: chunk.text,
+          text: speechText,
           voice: config.voice,
           lang_code: config.lang_code,
           speed: config.speed,
-          max_chars: config.maxChars
+          max_chars: Math.max(config.maxChars, speechText.length + 20)
         })
       });
 

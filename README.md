@@ -84,7 +84,9 @@ Use the reader's `Engine` select to switch between Kokoro and NeuTTS Nano.
 - Bookmarks tied to the current text.
 - NeuTTS custom voice references from uploaded audio, microphone recording, or browser shared-audio capture.
 - Auto transcript for custom voice references through a local Whisper ASR endpoint.
-- Chunk controls for sentence, paragraph, or line mode with min/max character bounds.
+- Chunk controls for smart, sentence, paragraph, or line mode with min/max character bounds.
+- Smart chunking splits long sentences at punctuation and uses smaller NeuTTS chunks to reduce skipped text. NeuTTS chunk sizes are capped more aggressively than Kokoro because Nano is more sensitive to long prompts.
+- Optional punctuation pause padding for synthesis without changing the highlighted reader text.
 - Queue caching, current-chunk highlighting, autoscroll, and save-current-audio support.
 
 ## Notes
