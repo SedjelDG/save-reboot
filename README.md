@@ -82,6 +82,7 @@ Use the reader's `Engine` select to switch between Kokoro and NeuTTS Air.
 - Local session resume through browser storage.
 - JSON session export/import for text, settings, current position, and bookmarks.
 - Bookmarks tied to the current text.
+- NeuTTS custom voice references from uploaded audio, microphone recording, or browser shared-audio capture.
 - Chunk controls for sentence, paragraph, or line mode with min/max character bounds.
 - Queue caching, current-chunk highlighting, autoscroll, and save-current-audio support.
 
@@ -89,4 +90,6 @@ Use the reader's `Engine` select to switch between Kokoro and NeuTTS Air.
 
 - Kokoro is the faster/default path and can use CUDA when the local PyTorch install supports it.
 - NeuTTS Air currently runs through the isolated `.venv-neutts` setup. In this project it is configured for CPU by default because the tested GPU path required a CUDA-enabled `llama-cpp-python` build.
+- Creating a custom NeuTTS voice loads the full NeuCodec encoder and can take several minutes the first time. The reference transcript should match the audio closely.
+- Custom voice reference files are saved under `samples/neutts/custom/` and ignored by Git by default to avoid committing personal voice data accidentally.
 - Generated WAV files, logs, model caches, and virtual environments are intentionally ignored by Git.

@@ -169,6 +169,12 @@
       gap: 8px;
     }
 
+    .triple-actions {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
     .check {
       grid-template-columns: 18px 1fr;
       align-items: center;
@@ -401,6 +407,12 @@
       white-space: pre-wrap;
     }
 
+    .small-note {
+      font-size: 12px;
+      line-height: 1.35;
+      color: #63716a;
+    }
+
     .hidden {
       display: none;
     }
@@ -477,6 +489,7 @@
 
     <input id="fileInput" class="hidden" type="file" accept=".txt,.md,.html,.htm,text/plain,text/markdown,text/html" />
     <input id="sessionInput" class="hidden" type="file" accept=".json,application/json" />
+    <input id="voiceAudioInput" class="hidden" type="file" accept="audio/*" />
 
     <div class="workspace">
       <aside class="panel">
@@ -507,6 +520,26 @@
             <input id="volume" type="number" min="0" max="1" step="0.05" value="1.0" />
           </label>
         </div>
+
+        <h2>Custom Voice</h2>
+        <label>
+          Name
+          <input id="voiceName" type="text" placeholder="my_voice" />
+        </label>
+        <label>
+          Transcript
+          <textarea id="voiceTranscript" rows="4" placeholder="Exact words spoken in the sample"></textarea>
+        </label>
+        <div class="triple-actions">
+          <button id="uploadVoiceAudio" class="ghost" type="button">Upload</button>
+          <button id="recordMic" class="ghost" type="button">Mic</button>
+          <button id="recordSystem" class="ghost" type="button">System</button>
+        </div>
+        <div class="compact-actions">
+          <button id="stopVoiceRecord" class="secondary" type="button" disabled>Stop</button>
+          <button id="saveVoice" type="button" disabled>Save Voice</button>
+        </div>
+        <div id="voiceSampleStatus" class="small-note">No reference audio selected.</div>
 
         <h2>Queue</h2>
         <label>
@@ -580,7 +613,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
 
   <script>
     const voices = __VOICES__;
-    const neuttsVoices = ["jo", "dave", "greta", "juliette", "mateo"];
+    let neuttsVoices = ["jo", "dave", "greta", "juliette", "mateo"];
     const languages = __LANGUAGES__;
     const engines = [
       ["kokoro", "Kokoro"],
@@ -608,7 +641,9 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       playbackResolve: null,
       bookmarks: [],
       serverHealth: {},
-      pendingCurrent: null
+      pendingCurrent: null,
+      voiceSample: null,
+      recorder: null
     };
 
     function fillSelect(id, values, selected) {
@@ -649,6 +684,75 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
 
     function log(message) {
       $("log").textContent = message;
+    }
+
+    function setVoiceSample(blob, label) {
+      state.voiceSample = { blob, label };
+      $("voiceSampleStatus").textContent = `${label} | ${(blob.size / 1024).toFixed(1)} KB`;
+      $("saveVoice").disabled = false;
+    }
+
+    function blobToDataUrl(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    function encodeWav(samples, sampleRate) {
+      const buffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(buffer);
+      const writeString = (offset, value) => {
+        for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i));
+      };
+
+      writeString(0, "RIFF");
+      view.setUint32(4, 36 + samples.length * 2, true);
+      writeString(8, "WAVE");
+      writeString(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, "data");
+      view.setUint32(40, samples.length * 2, true);
+
+      let offset = 44;
+      for (const sample of samples) {
+        const clamped = Math.max(-1, Math.min(1, sample));
+        view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+        offset += 2;
+      }
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    function flattenAudioChunks(chunks) {
+      const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const samples = new Float32Array(length);
+      let offset = 0;
+      for (const chunk of chunks) {
+        samples.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return samples;
+    }
+
+    async function refreshNeuttsVoices(preferredVoice) {
+      try {
+        const response = await fetch(`${engineEndpoints.neutts}/api/voices`);
+        const data = await response.json();
+        if (Array.isArray(data.voices)) {
+          neuttsVoices = data.voices.map((voice) => [voice.id, voice.kind === "custom" ? `${voice.id} (custom)` : voice.id]);
+        }
+      } catch {}
+      if (settings().engine === "neutts") {
+        syncEngineControls(preferredVoice || $("voice").value);
+      }
     }
 
     function settings() {
@@ -1128,6 +1232,90 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       log(`Imported session from ${file.name}.`);
     }
 
+    async function startVoiceRecording(kind) {
+      if (state.recorder) return;
+      const stream = kind === "system"
+        ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+        : await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      if (kind === "system" && !stream.getAudioTracks().length) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error("No shared audio track was provided.");
+      }
+
+      const audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      const silence = audioContext.createGain();
+      silence.gain.value = 0;
+      const chunks = [];
+
+      processor.onaudioprocess = (event) => {
+        chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+      };
+      source.connect(processor);
+      processor.connect(silence);
+      silence.connect(audioContext.destination);
+
+      state.recorder = { kind, stream, audioContext, source, processor, silence, chunks, startedAt: performance.now() };
+      $("stopVoiceRecord").disabled = false;
+      $("recordMic").disabled = true;
+      $("recordSystem").disabled = true;
+      $("uploadVoiceAudio").disabled = true;
+      $("voiceSampleStatus").textContent = kind === "system" ? "Recording shared audio..." : "Recording microphone...";
+    }
+
+    async function stopVoiceRecording() {
+      const recorder = state.recorder;
+      if (!recorder) return;
+      recorder.processor.disconnect();
+      recorder.silence.disconnect();
+      recorder.source.disconnect();
+      recorder.stream.getTracks().forEach((track) => track.stop());
+      const sampleRate = recorder.audioContext.sampleRate;
+      await recorder.audioContext.close();
+
+      const samples = flattenAudioChunks(recorder.chunks);
+      const blob = encodeWav(samples, sampleRate);
+      const seconds = (performance.now() - recorder.startedAt) / 1000;
+      state.recorder = null;
+      $("stopVoiceRecord").disabled = true;
+      $("recordMic").disabled = false;
+      $("recordSystem").disabled = false;
+      $("uploadVoiceAudio").disabled = false;
+      setVoiceSample(blob, `${recorder.kind} recording ${seconds.toFixed(1)}s`);
+    }
+
+    async function saveCustomVoice() {
+      const name = $("voiceName").value.trim();
+      const transcript = $("voiceTranscript").value.trim();
+      if (!state.voiceSample) throw new Error("Select or record reference audio first.");
+      if (!name) throw new Error("Voice name is required.");
+      if (!transcript) throw new Error("Transcript is required.");
+
+      $("saveVoice").disabled = true;
+      setStatus("Encoding voice");
+      $("voiceSampleStatus").textContent = "Encoding custom voice...";
+      const audioData = await blobToDataUrl(state.voiceSample.blob);
+      const response = await fetch(`${engineEndpoints.neutts}/api/voices`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, transcript, audio_base64: audioData })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Voice encoding failed.");
+
+      await refreshNeuttsVoices(data.voice.id);
+      $("engine").value = "neutts";
+      syncEngineControls(data.voice.id);
+      $("voice").value = data.voice.id;
+      savePrefs();
+      refreshServerStatus();
+      setStatus("Voice saved");
+      $("voiceSampleStatus").textContent = `Saved ${data.voice.id}.`;
+      log(`Saved NeuTTS voice '${data.voice.id}' from ${data.voice.seconds.toFixed(1)}s reference audio.`);
+    }
+
     async function testTone() {
       setStatus("Playing tone");
       const response = await fetch(apiUrl("/api/tone"));
@@ -1211,6 +1399,12 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
           event.target.value = "";
         }
       });
+      $("voiceAudioInput").addEventListener("change", async (event) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        setVoiceSample(file, file.name);
+        event.target.value = "";
+      });
       $("buildQueue").addEventListener("click", buildChunks);
       $("play").addEventListener("click", () => {
         if (state.playing) {
@@ -1232,7 +1426,42 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       $("exportSession").addEventListener("click", exportSession);
       $("importSession").addEventListener("click", () => $("sessionInput").click());
       $("tone").addEventListener("click", testTone);
+      $("uploadVoiceAudio").addEventListener("click", () => $("voiceAudioInput").click());
+      $("recordMic").addEventListener("click", async () => {
+        try {
+          await startVoiceRecording("mic");
+        } catch (error) {
+          setStatus("Record error");
+          log(String(error.message || error));
+        }
+      });
+      $("recordSystem").addEventListener("click", async () => {
+        try {
+          await startVoiceRecording("system");
+        } catch (error) {
+          setStatus("Record error");
+          log(String(error.message || error));
+        }
+      });
+      $("stopVoiceRecord").addEventListener("click", async () => {
+        try {
+          await stopVoiceRecording();
+        } catch (error) {
+          setStatus("Record error");
+          log(String(error.message || error));
+        }
+      });
+      $("saveVoice").addEventListener("click", async () => {
+        try {
+          await saveCustomVoice();
+        } catch (error) {
+          $("saveVoice").disabled = !state.voiceSample;
+          setStatus("Voice error");
+          log(String(error.message || error));
+        }
+      });
       $("refreshServers").addEventListener("click", () => {
+        refreshNeuttsVoices();
         refreshServerStatus();
         refreshHealth();
       });
@@ -1295,6 +1524,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
     loadPrefs();
     bindEvents();
     buildChunks();
+    refreshNeuttsVoices();
     refreshServerStatus();
     refreshHealth();
   </script>

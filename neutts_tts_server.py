@@ -1,7 +1,9 @@
 import argparse
+import base64
 import io
 import json
 import os
+import re
 import threading
 import time
 from http import HTTPStatus
@@ -33,7 +35,8 @@ if hasattr(os, "add_dll_directory") and TORCH_LIB.exists():
 from neutts import NeuTTS  # noqa: E402
 
 
-VOICES = ["jo", "dave", "greta", "juliette", "mateo"]
+BUILTIN_VOICES = ["jo", "dave", "greta", "juliette", "mateo"]
+CUSTOM_SAMPLE_DIR = SAMPLE_DIR / "custom"
 
 
 def make_test_tone(sample_rate: int = 24000, seconds: float = 1.0, frequency: float = 440.0) -> bytes:
@@ -48,9 +51,11 @@ class NeuTTSState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.tts: NeuTTS | None = None
+        self.encoder_codec = None
         self.refs: dict[str, tuple[torch.Tensor, str]] = {}
         self.load_lock = threading.Lock()
         self.infer_lock = threading.Lock()
+        self.encode_lock = threading.Lock()
 
     @property
     def loaded(self) -> bool:
@@ -80,23 +85,122 @@ class NeuTTSState:
             print(f"NeuTTS loaded in {time.perf_counter() - started:.2f}s.", flush=True)
             return self.tts
 
+    def voice_dirs(self) -> list[Path]:
+        dirs = []
+        if SAMPLE_DIR.exists():
+            dirs.append(SAMPLE_DIR)
+        if CUSTOM_SAMPLE_DIR.exists():
+            dirs.append(CUSTOM_SAMPLE_DIR)
+        if LEGACY_SAMPLE_DIR.exists():
+            dirs.append(LEGACY_SAMPLE_DIR)
+        return dirs
+
+    def list_voices(self) -> list[dict]:
+        seen = set()
+        voices = []
+        for directory in self.voice_dirs():
+            kind = "custom" if directory == CUSTOM_SAMPLE_DIR else "preset"
+            for codes_path in sorted(directory.glob("*.pt")):
+                text_path = codes_path.with_suffix(".txt")
+                if not text_path.exists() or codes_path.stem in seen:
+                    continue
+                seen.add(codes_path.stem)
+                voices.append({"id": codes_path.stem, "label": codes_path.stem, "kind": kind})
+        return voices
+
+    def find_reference_paths(self, voice: str) -> tuple[Path, Path] | None:
+        for directory in self.voice_dirs():
+            codes_path = directory / f"{voice}.pt"
+            text_path = directory / f"{voice}.txt"
+            if codes_path.exists() and text_path.exists():
+                return codes_path, text_path
+        return None
+
     def get_reference(self, voice: str) -> tuple[torch.Tensor, str]:
-        if voice not in VOICES:
+        paths = self.find_reference_paths(voice)
+        if not paths:
             raise ValueError(f"Unsupported NeuTTS voice: {voice}")
 
         if voice in self.refs:
             return self.refs[voice]
 
-        sample_dir = SAMPLE_DIR if SAMPLE_DIR.exists() else LEGACY_SAMPLE_DIR
-        codes_path = sample_dir / f"{voice}.pt"
-        text_path = sample_dir / f"{voice}.txt"
-        if not codes_path.exists() or not text_path.exists():
-            raise FileNotFoundError(f"Missing reference files for voice '{voice}'.")
-
+        codes_path, text_path = paths
         ref_codes = torch.load(codes_path, map_location="cpu")
         ref_text = text_path.read_text(encoding="utf-8").strip()
         self.refs[voice] = (ref_codes, ref_text)
         return self.refs[voice]
+
+    def get_encoder_codec(self):
+        if self.encoder_codec is not None:
+            return self.encoder_codec
+
+        with self.load_lock:
+            if self.encoder_codec is not None:
+                return self.encoder_codec
+
+            from neucodec import NeuCodec
+
+            print(f"Loading NeuCodec encoder on {self.args.encoder_device} ...", flush=True)
+            started = time.perf_counter()
+            codec = NeuCodec.from_pretrained("neuphonic/neucodec")
+            codec.eval().to(self.args.encoder_device)
+            self.encoder_codec = codec
+            print(f"NeuCodec encoder loaded in {time.perf_counter() - started:.2f}s.", flush=True)
+            return self.encoder_codec
+
+    def sanitize_voice_name(self, name: str) -> str:
+        clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", name.strip().lower()).strip("_")
+        if not clean:
+            raise ValueError("Voice name is required.")
+        if clean in {"con", "prn", "aux", "nul"}:
+            raise ValueError("That voice name is reserved on Windows.")
+        return clean[:48]
+
+    def create_voice(self, payload: dict) -> dict:
+        name = self.sanitize_voice_name(str(payload.get("name", "")))
+        transcript = str(payload.get("transcript", "")).strip()
+        audio_base64 = str(payload.get("audio_base64", "")).strip()
+        if not transcript:
+            raise ValueError("Transcript is required for NeuTTS reference cloning.")
+        if not audio_base64:
+            raise ValueError("Audio data is required.")
+        if "," in audio_base64 and audio_base64.split(",", 1)[0].startswith("data:"):
+            audio_base64 = audio_base64.split(",", 1)[1]
+
+        CUSTOM_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+        audio_path = CUSTOM_SAMPLE_DIR / f"{name}.wav"
+        codes_path = CUSTOM_SAMPLE_DIR / f"{name}.pt"
+        text_path = CUSTOM_SAMPLE_DIR / f"{name}.txt"
+
+        audio_bytes = base64.b64decode(audio_base64)
+        if len(audio_bytes) < 1024:
+            raise ValueError("Audio sample is too small.")
+        if len(audio_bytes) > self.args.max_reference_mb * 1024 * 1024:
+            raise ValueError(f"Audio sample is larger than {self.args.max_reference_mb} MB.")
+
+        audio_path.write_bytes(audio_bytes)
+        text_path.write_text(transcript, encoding="utf-8")
+
+        with self.encode_lock:
+            from librosa import load
+
+            codec = self.get_encoder_codec()
+            wav, _ = load(audio_path, sr=16000, mono=True)
+            wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)
+            with torch.no_grad():
+                ref_codes = codec.encode_code(audio_or_path=wav_tensor).squeeze(0).squeeze(0)
+            torch.save(ref_codes.cpu(), codes_path)
+
+        self.refs.pop(name, None)
+        return {
+            "id": name,
+            "label": name,
+            "kind": "custom",
+            "audio_path": str(audio_path.relative_to(ROOT)),
+            "codes_path": str(codes_path.relative_to(ROOT)),
+            "text_path": str(text_path.relative_to(ROOT)),
+            "seconds": len(wav) / 16000,
+        }
 
     def speak(self, payload: dict) -> tuple[bytes, dict]:
         text = str(payload.get("text", "")).strip()
@@ -169,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "engine": "neutts",
                     "pipeline_loaded": self.state.loaded,
-                    "voices": VOICES,
+                    "voices": self.state.list_voices(),
                     "backbone": self.state.args.backbone,
                     "backbone_device": self.state.args.backbone_device,
                     "codec": self.state.args.codec,
@@ -180,6 +284,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/api/voices":
+            self._send_json(HTTPStatus.OK, {"voices": self.state.list_voices()})
+            return
+
         if path == "/api/tone":
             self._send_bytes(HTTPStatus.OK, make_test_tone(), "audio/wav")
             return
@@ -188,7 +296,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path != "/api/speak":
+        if path not in {"/api/speak", "/api/voices"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
 
@@ -201,9 +309,13 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 payload = {key: values[0] for key, values in parse_qs(raw.decode("utf-8")).items()}
 
-            audio, metadata = self.state.speak(payload)
-            headers = {"X-TTS-Metadata": json.dumps(metadata)}
-            self._send_bytes(HTTPStatus.OK, audio, "audio/wav", headers=headers)
+            if path == "/api/voices":
+                voice = self.state.create_voice(payload)
+                self._send_json(HTTPStatus.OK, {"ok": True, "voice": voice, "voices": self.state.list_voices()})
+            else:
+                audio, metadata = self.state.speak(payload)
+                headers = {"X-TTS-Metadata": json.dumps(metadata)}
+                self._send_bytes(HTTPStatus.OK, audio, "audio/wav", headers=headers)
         except Exception as error:
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
@@ -219,8 +331,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codec", default="neuphonic/neucodec-onnx-decoder")
     parser.add_argument("--backbone-device", default="cpu", choices=["cpu", "gpu"])
     parser.add_argument("--codec-device", default="cpu")
-    parser.add_argument("--voice", default="jo", choices=VOICES)
+    parser.add_argument("--voice", default="jo")
     parser.add_argument("--max-chars", type=int, default=500)
+    parser.add_argument("--encoder-device", default="cpu")
+    parser.add_argument("--max-reference-mb", type=int, default=30)
     parser.add_argument("--preload", action="store_true", help="Load NeuTTS before accepting requests.")
     return parser.parse_args()
 
