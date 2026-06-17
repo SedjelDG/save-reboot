@@ -1,0 +1,4 @@
+kokoro
+numpy
+soundfile
+torch

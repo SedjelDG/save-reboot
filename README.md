@@ -14,19 +14,30 @@ Current engines:
 - `kokoro_reader.html` is the browser reader UI.
 - `neutts_tts_server.py` serves NeuTTS Air `/api/speak`.
 - `qwen3_tts_server.py` is the earlier Qwen3-TTS local test server.
-- `run_kokoro_tts_server.ps1`, `run_neutts_tts_server.ps1`, and `run_qwen3_tts_server.ps1` start the local services.
+- `setup.ps1` recreates the Kokoro and NeuTTS virtual environments.
+- `start_all.ps1` starts Kokoro and NeuTTS together.
+- `run_kokoro_tts_server.ps1`, `run_neutts_tts_server.ps1`, and `run_qwen3_tts_server.ps1` start individual services.
+- `requirements-kokoro.txt`, `requirements-neutts.txt`, and `requirements-qwen3.txt` capture Python dependencies.
 - `samples/neutts/*.pt` and `samples/neutts/*.txt` are the NeuTTS reference voices used by the reader.
 
 ## Local Setup
 
 Create separate virtual environments for Kokoro and NeuTTS. They intentionally stay separate because their phonemizer dependencies conflict.
 
+Recommended setup:
+
+```powershell
+.\setup.ps1
+```
+
+Manual setup:
+
 Kokoro:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install kokoro soundfile numpy torch
+.\.venv\Scripts\python.exe -m pip install -r requirements-kokoro.txt
 ```
 
 NeuTTS:
@@ -34,12 +45,18 @@ NeuTTS:
 ```powershell
 python -m venv .venv-neutts
 .\.venv-neutts\Scripts\python.exe -m pip install --upgrade pip
-.\.venv-neutts\Scripts\python.exe -m pip install "neutts[all]"
+.\.venv-neutts\Scripts\python.exe -m pip install -r requirements-neutts.txt
 ```
 
 ## Run
 
-Start Kokoro:
+Start both integrated services:
+
+```powershell
+.\start_all.ps1
+```
+
+Or start Kokoro:
 
 ```powershell
 .\run_kokoro_tts_server.ps1
@@ -58,6 +75,15 @@ http://127.0.0.1:7860
 ```
 
 Use the reader's `Engine` select to switch between Kokoro and NeuTTS Air.
+
+## Reader Features
+
+- Engine status cards for Kokoro and NeuTTS.
+- Local session resume through browser storage.
+- JSON session export/import for text, settings, current position, and bookmarks.
+- Bookmarks tied to the current text.
+- Chunk controls for sentence, paragraph, or line mode with min/max character bounds.
+- Queue caching, current-chunk highlighting, autoscroll, and save-current-audio support.
 
 ## Notes
 

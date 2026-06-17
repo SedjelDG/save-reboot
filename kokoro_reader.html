@@ -84,7 +84,7 @@
 
     .toolbar {
       display: grid;
-      grid-template-columns: repeat(9, minmax(0, auto)) minmax(180px, 1fr);
+      grid-template-columns: repeat(12, minmax(0, auto)) minmax(180px, 1fr);
       gap: 8px;
       align-items: center;
       margin-bottom: 12px;
@@ -158,6 +158,12 @@
     }
 
     .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .compact-actions {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
@@ -249,7 +255,7 @@
 
     .reader-footer {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr auto auto;
       gap: 12px;
       align-items: center;
       padding: 10px;
@@ -266,6 +272,69 @@
       font-size: 13px;
       text-align: right;
       color: #45514b;
+    }
+
+    .reader-meta {
+      min-width: 170px;
+      font-size: 13px;
+      color: #45514b;
+      text-align: right;
+    }
+
+    .status-grid {
+      display: grid;
+      gap: 8px;
+    }
+
+    .server-card {
+      display: grid;
+      gap: 4px;
+      padding: 9px;
+      border: 1px solid #d3d9d5;
+      border-radius: 8px;
+      background: #fffef9;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .server-card strong {
+      font-size: 13px;
+    }
+
+    .server-card.ok strong { color: #245e4f; }
+    .server-card.bad strong { color: #8a4d35; }
+
+    .bookmark-list {
+      display: grid;
+      gap: 8px;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    .bookmark-item {
+      display: grid;
+      gap: 6px;
+      padding: 9px;
+      border: 1px solid #d3d9d5;
+      border-radius: 8px;
+      background: #fffef9;
+    }
+
+    .bookmark-item .label {
+      font-size: 12px;
+      color: #63716a;
+    }
+
+    .bookmark-item .excerpt {
+      font-size: 13px;
+      line-height: 1.35;
+      font-weight: 560;
+    }
+
+    .bookmark-item .actions {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
     }
 
     .queue-shell {
@@ -400,13 +469,21 @@
       <button id="next" class="ghost" type="button">Next</button>
       <button id="cacheAll" class="ghost" type="button">Cache</button>
       <button id="download" class="ghost" type="button">Save</button>
+      <button id="bookmark" class="ghost" type="button">Bookmark</button>
+      <button id="exportSession" class="ghost" type="button">Export</button>
+      <button id="importSession" class="ghost" type="button">Import</button>
       <div class="progress-shell"><div class="progress-bar" id="progressBar"></div></div>
     </nav>
 
     <input id="fileInput" class="hidden" type="file" accept=".txt,.md,.html,.htm,text/plain,text/markdown,text/html" />
+    <input id="sessionInput" class="hidden" type="file" accept=".json,application/json" />
 
     <div class="workspace">
       <aside class="panel">
+        <h2>Servers</h2>
+        <div id="engineStatus" class="status-grid"></div>
+        <button id="refreshServers" class="ghost" type="button">Refresh Status</button>
+
         <h2>Voice</h2>
         <label>
           Engine
@@ -437,12 +514,19 @@
           <select id="chunkMode">
             <option value="sentence">Sentence</option>
             <option value="paragraph">Paragraph</option>
+            <option value="line">Line</option>
           </select>
         </label>
-        <label>
-          Max chars
-          <input id="maxChars" type="number" min="80" max="1400" step="20" value="360" />
-        </label>
+        <div class="split">
+          <label>
+            Min chars
+            <input id="minChars" type="number" min="0" max="900" step="20" value="120" />
+          </label>
+          <label>
+            Max chars
+            <input id="maxChars" type="number" min="80" max="1400" step="20" value="360" />
+          </label>
+        </div>
         <label class="check">
           <input id="autoScroll" type="checkbox" checked />
           Auto-scroll
@@ -457,6 +541,14 @@
         </label>
         <button id="tone" class="secondary" type="button">Test Tone</button>
         <button id="clearCache" class="ghost" type="button">Clear Cache</button>
+
+        <h2>Bookmarks</h2>
+        <div class="compact-actions">
+          <button id="addBookmark" type="button">Add</button>
+          <button id="clearBookmarks" class="ghost" type="button">Clear</button>
+        </div>
+        <div id="bookmarkList" class="bookmark-list"></div>
+
         <pre id="log" class="log"></pre>
       </aside>
 
@@ -471,6 +563,7 @@
 Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build the queue, and press play. The current chunk will stay highlighted while audio plays.</textarea>
         <div class="reader-footer">
           <audio id="audio" controls></audio>
+          <div class="reader-meta" id="readerMeta">0%</div>
           <div class="counter" id="counter">0 / 0</div>
         </div>
       </section>
@@ -498,6 +591,8 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       kokoro: "",
       neutts: "http://127.0.0.1:7861"
     };
+    const PREF_KEY = "kokoro-reader-prefs";
+    const BOOKMARK_KEY = "local-tts-reader-bookmarks";
     const $ = (id) => document.getElementById(id);
 
     const state = {
@@ -510,7 +605,10 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       currentUrl: null,
       currentBlob: null,
       currentMeta: null,
-      playbackResolve: null
+      playbackResolve: null,
+      bookmarks: [],
+      serverHealth: {},
+      pendingCurrent: null
     };
 
     function fillSelect(id, values, selected) {
@@ -521,6 +619,10 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
         const attr = value === selected ? " selected" : "";
         return `<option value="${value}"${attr}>${label}</option>`;
       }).join("");
+    }
+
+    function selectedValue(id, fallback) {
+      return $(id)?.value || fallback;
     }
 
     function voiceChoicesForEngine(engine) {
@@ -551,12 +653,13 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
 
     function settings() {
       return {
-        engine: $("engine").value || "kokoro",
-        voice: $("voice").value,
-        lang_code: $("language").value,
+        engine: selectedValue("engine", "kokoro"),
+        voice: selectedValue("voice", "af_heart"),
+        lang_code: selectedValue("language", "a"),
         speed: Number($("speed").value),
         volume: Number($("volume").value),
         mode: $("chunkMode").value,
+        minChars: Number($("minChars").value),
         maxChars: Number($("maxChars").value),
         autoScroll: $("autoScroll").checked,
         prefetch: $("prefetch").checked,
@@ -564,27 +667,46 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       };
     }
 
+    function applySettings(data) {
+      if (data.engine) $("engine").value = data.engine;
+      syncEngineControls(data.voice);
+      if (data.lang_code) $("language").value = data.lang_code;
+      if (data.speed) $("speed").value = data.speed;
+      if (data.volume !== undefined) $("volume").value = data.volume;
+      if (data.mode) $("chunkMode").value = data.mode;
+      if (data.minChars !== undefined) $("minChars").value = data.minChars;
+      if (data.maxChars) $("maxChars").value = data.maxChars;
+      if (data.autoScroll !== undefined) $("autoScroll").checked = data.autoScroll;
+      if (data.prefetch !== undefined) $("prefetch").checked = data.prefetch;
+      if (data.cacheAudio !== undefined) $("cacheAudio").checked = data.cacheAudio;
+    }
+
     function savePrefs() {
       const data = settings();
       data.source = $("source").value;
-      localStorage.setItem("kokoro-reader-prefs", JSON.stringify(data));
+      data.current = state.current;
+      localStorage.setItem(PREF_KEY, JSON.stringify(data));
     }
 
     function loadPrefs() {
       try {
-        const data = JSON.parse(localStorage.getItem("kokoro-reader-prefs") || "{}");
+        const data = JSON.parse(localStorage.getItem(PREF_KEY) || "{}");
         if (data.source) $("source").value = data.source;
-        if (data.engine) $("engine").value = data.engine;
-        syncEngineControls(data.voice);
-        if (data.lang_code) $("language").value = data.lang_code;
-        if (data.speed) $("speed").value = data.speed;
-        if (data.volume !== undefined) $("volume").value = data.volume;
-        if (data.mode) $("chunkMode").value = data.mode;
-        if (data.maxChars) $("maxChars").value = data.maxChars;
-        if (data.autoScroll !== undefined) $("autoScroll").checked = data.autoScroll;
-        if (data.prefetch !== undefined) $("prefetch").checked = data.prefetch;
-        if (data.cacheAudio !== undefined) $("cacheAudio").checked = data.cacheAudio;
+        applySettings(data);
+        if (Number.isInteger(data.current)) state.pendingCurrent = data.current;
       } catch {}
+    }
+
+    function loadBookmarks() {
+      try {
+        state.bookmarks = JSON.parse(localStorage.getItem(BOOKMARK_KEY) || "[]");
+      } catch {
+        state.bookmarks = [];
+      }
+    }
+
+    function saveBookmarks() {
+      localStorage.setItem(BOOKMARK_KEY, JSON.stringify(state.bookmarks));
     }
 
     function stripHtml(text) {
@@ -611,14 +733,46 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       return text.replace(/\\r/g, "").split(/\\n{2,}/).map((x) => x.replace(/\\s+/g, " ").trim()).filter(Boolean);
     }
 
-    function packUnits(units, maxChars) {
+    function lineUnits(text) {
+      return text.replace(/\\r/g, "").split(/\\n+/).map((x) => x.replace(/\\s+/g, " ").trim()).filter(Boolean);
+    }
+
+    function splitLongUnit(unit, maxChars) {
+      if (unit.length <= maxChars) return [unit];
       const chunks = [];
       let current = "";
-      for (const unit of units) {
+      for (const word of unit.split(/\\s+/)) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (candidate.length <= maxChars || !current) {
+          current = candidate;
+        } else {
+          chunks.push(current);
+          current = word;
+        }
+      }
+      if (current) chunks.push(current);
+      return chunks;
+    }
+
+    function unitsForMode(text, mode) {
+      if (mode === "paragraph") return paragraphUnits(text);
+      if (mode === "line") return lineUnits(text);
+      return sentenceUnits(text);
+    }
+
+    function packUnits(units, minChars, maxChars) {
+      const chunks = [];
+      let current = "";
+      const normalized = units.flatMap((unit) => splitLongUnit(unit, maxChars));
+      for (const unit of normalized) {
+        const candidate = current ? `${current} ${unit}` : unit;
         if (!current) {
           current = unit;
-        } else if ((current + " " + unit).length <= maxChars) {
-          current += " " + unit;
+        } else if (candidate.length <= maxChars) {
+          current = candidate;
+        } else if (current.length < minChars) {
+          chunks.push(current);
+          current = unit;
         } else {
           chunks.push(current);
           current = unit;
@@ -631,14 +785,18 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
     function buildChunks() {
       savePrefs();
       const config = settings();
-      const units = config.mode === "paragraph" ? paragraphUnits(sourceText()) : sentenceUnits(sourceText());
-      state.chunks = packUnits(units, config.maxChars).map((text, index) => ({ id: index, text }));
-      state.current = state.chunks.length ? 0 : -1;
+      const minChars = Math.max(0, Math.min(config.minChars || 0, config.maxChars - 20));
+      const units = unitsForMode(sourceText(), config.mode);
+      state.chunks = packUnits(units, minChars, config.maxChars).map((text, index) => ({ id: index, text }));
+      const resumeIndex = state.pendingCurrent ?? state.current;
+      state.current = state.chunks.length ? Math.max(0, Math.min(state.chunks.length - 1, resumeIndex >= 0 ? resumeIndex : 0)) : -1;
+      state.pendingCurrent = null;
       state.cancel = false;
       state.jump = null;
       renderAll();
       setStatus(state.chunks.length ? "Queue ready" : "No text");
       log(`${state.chunks.length} chunks built.`);
+      savePrefs();
     }
 
     function escapeHtml(text) {
@@ -674,6 +832,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
     function renderAll() {
       renderReader();
       renderQueue();
+      renderBookmarks();
       updateCounter();
       updateProgress();
     }
@@ -682,6 +841,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       if (!state.chunks[index]) return;
       state.current = index;
       renderAll();
+      savePrefs();
       if (scroll && settings().autoScroll) scrollCurrentIntoView();
     }
 
@@ -699,10 +859,80 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       const total = state.chunks.length;
       const pct = total ? ((state.current + 1) / total) * 100 : 0;
       $("progressBar").style.width = `${Math.max(0, Math.min(100, pct))}%`;
+      const charsRead = state.current >= 0 ? state.chunks.slice(0, state.current + 1).reduce((sum, chunk) => sum + chunk.text.length, 0) : 0;
+      const charsTotal = state.chunks.reduce((sum, chunk) => sum + chunk.text.length, 0);
+      const charPct = charsTotal ? Math.round((charsRead / charsTotal) * 100) : 0;
+      $("readerMeta").textContent = `${charPct}% | ${charsRead.toLocaleString()} / ${charsTotal.toLocaleString()} chars`;
     }
 
     function setStatus(text) {
       $("status").textContent = text;
+    }
+
+    function sourceHash() {
+      const text = sourceText();
+      let hash = 0;
+      for (let index = 0; index < text.length; index += 1) {
+        hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+      }
+      return String(hash);
+    }
+
+    function bookmarkLabel(bookmark) {
+      const date = bookmark.createdAt ? new Date(bookmark.createdAt).toLocaleString() : "";
+      return `Chunk ${bookmark.index + 1}${date ? ` | ${date}` : ""}`;
+    }
+
+    function addBookmark() {
+      if (!state.chunks[state.current]) return;
+      const chunk = state.chunks[state.current];
+      const bookmark = {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        sourceHash: sourceHash(),
+        index: state.current,
+        excerpt: chunk.text.slice(0, 180),
+        createdAt: new Date().toISOString()
+      };
+      state.bookmarks = [bookmark, ...state.bookmarks].slice(0, 80);
+      saveBookmarks();
+      renderBookmarks();
+      log(`Bookmarked chunk ${state.current + 1}.`);
+    }
+
+    function renderBookmarks() {
+      const activeHash = sourceHash();
+      const active = state.bookmarks.filter((bookmark) => bookmark.sourceHash === activeHash);
+      $("bookmarkList").innerHTML = active.length ? active.map((bookmark) => `
+        <div class="bookmark-item" data-id="${bookmark.id}">
+          <div class="label">${escapeHtml(bookmarkLabel(bookmark))}</div>
+          <div class="excerpt">${escapeHtml(bookmark.excerpt)}</div>
+          <div class="actions">
+            <button class="go-bookmark" type="button">Go</button>
+            <button class="ghost remove-bookmark" type="button">X</button>
+          </div>
+        </div>
+      `).join("") : `<div class="server-card">No bookmarks for this text.</div>`;
+    }
+
+    function goBookmark(id) {
+      const bookmark = state.bookmarks.find((item) => item.id === id);
+      if (!bookmark) return;
+      if (!state.chunks.length) buildChunks();
+      jumpTo(Math.max(0, Math.min(state.chunks.length - 1, bookmark.index)), false);
+    }
+
+    function removeBookmark(id) {
+      state.bookmarks = state.bookmarks.filter((bookmark) => bookmark.id !== id);
+      saveBookmarks();
+      renderBookmarks();
+    }
+
+    function clearActiveBookmarks() {
+      const activeHash = sourceHash();
+      state.bookmarks = state.bookmarks.filter((bookmark) => bookmark.sourceHash !== activeHash);
+      saveBookmarks();
+      renderBookmarks();
+      log("Bookmarks cleared for this text.");
     }
 
     function cacheKey(index) {
@@ -863,6 +1093,41 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       }
     }
 
+    function exportSession() {
+      const data = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        source: $("source").value,
+        settings: settings(),
+        current: state.current,
+        bookmarks: state.bookmarks
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `reader-session-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    }
+
+    async function importSessionFile(file) {
+      if (!file) return;
+      const data = JSON.parse(await file.text());
+      if (typeof data.source === "string") $("source").value = data.source;
+      if (data.settings) applySettings(data.settings);
+      if (Array.isArray(data.bookmarks)) {
+        state.bookmarks = data.bookmarks;
+        saveBookmarks();
+      }
+      state.pendingCurrent = Number.isInteger(data.current) ? data.current : 0;
+      state.cache.clear();
+      buildChunks();
+      savePrefs();
+      renderAll();
+      refreshHealth();
+      log(`Imported session from ${file.name}.`);
+    }
+
     async function testTone() {
       setStatus("Playing tone");
       const response = await fetch(apiUrl("/api/tone"));
@@ -898,6 +1163,34 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       }
     }
 
+    function renderServerStatus() {
+      $("engineStatus").innerHTML = engines.map(([engine, label]) => {
+        const item = state.serverHealth[engine];
+        if (!item) {
+          return `<div class="server-card"><strong>${label}</strong><span>Not checked</span></div>`;
+        }
+        if (!item.ok) {
+          return `<div class="server-card bad"><strong>${label}</strong><span>Unavailable</span><span>${escapeHtml(item.error || "")}</span></div>`;
+        }
+        const loaded = item.data.pipeline_loaded ? "loaded" : "ready";
+        const device = item.data.gpu || item.data.device || item.data.backbone_device || "unknown device";
+        return `<div class="server-card ok"><strong>${label}</strong><span>${loaded}</span><span>${escapeHtml(device)}</span></div>`;
+      }).join("");
+    }
+
+    async function refreshServerStatus() {
+      await Promise.all(engines.map(async ([engine]) => {
+        const endpoint = engineEndpoints[engine] || "";
+        try {
+          const response = await fetch(`${endpoint}/api/health`);
+          state.serverHealth[engine] = { ok: response.ok, data: await response.json() };
+        } catch (error) {
+          state.serverHealth[engine] = { ok: false, error: String(error.message || error) };
+        }
+      }));
+      renderServerStatus();
+    }
+
     function bindEvents() {
       $("openFile").addEventListener("click", () => $("fileInput").click());
       $("fileInput").addEventListener("change", async (event) => {
@@ -905,7 +1198,18 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
         if (!file) return;
         $("source").value = await file.text();
         state.cache.clear();
+        state.pendingCurrent = 0;
         buildChunks();
+      });
+      $("sessionInput").addEventListener("change", async (event) => {
+        try {
+          await importSessionFile(event.target.files?.[0]);
+        } catch (error) {
+          setStatus("Import error");
+          log(String(error.message || error));
+        } finally {
+          event.target.value = "";
+        }
       });
       $("buildQueue").addEventListener("click", buildChunks);
       $("play").addEventListener("click", () => {
@@ -924,11 +1228,19 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       $("next").addEventListener("click", () => jumpTo(Math.min(state.chunks.length - 1, state.current + 1), state.playing));
       $("cacheAll").addEventListener("click", cacheAll);
       $("download").addEventListener("click", downloadCurrent);
+      $("bookmark").addEventListener("click", addBookmark);
+      $("exportSession").addEventListener("click", exportSession);
+      $("importSession").addEventListener("click", () => $("sessionInput").click());
       $("tone").addEventListener("click", testTone);
+      $("refreshServers").addEventListener("click", () => {
+        refreshServerStatus();
+        refreshHealth();
+      });
       $("engine").addEventListener("change", () => {
         syncEngineControls();
         savePrefs();
         renderAll();
+        refreshServerStatus();
         refreshHealth();
       });
       $("readTab").addEventListener("click", () => {
@@ -949,11 +1261,20 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
         const node = event.target.closest(".queue-item");
         if (node) jumpTo(Number(node.dataset.index), false);
       });
-      ["voice", "language", "speed", "volume", "chunkMode", "maxChars", "autoScroll", "prefetch", "cacheAudio"].forEach((id) => {
+      $("bookmarkList").addEventListener("click", (event) => {
+        const node = event.target.closest(".bookmark-item");
+        if (!node) return;
+        if (event.target.closest(".go-bookmark")) goBookmark(node.dataset.id);
+        if (event.target.closest(".remove-bookmark")) removeBookmark(node.dataset.id);
+      });
+      $("addBookmark").addEventListener("click", addBookmark);
+      $("clearBookmarks").addEventListener("click", clearActiveBookmarks);
+      ["voice", "language", "speed", "volume", "chunkMode", "minChars", "maxChars", "autoScroll", "prefetch", "cacheAudio"].forEach((id) => {
         $(id).addEventListener("change", savePrefs);
       });
       $("source").addEventListener("input", () => {
         savePrefs();
+        renderBookmarks();
       });
       $("clearCache").addEventListener("click", () => {
         state.cache.clear();
@@ -969,9 +1290,12 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
     fillSelect("engine", engines, "kokoro");
     fillSelect("voice", voices, "af_heart");
     fillSelect("language", languages, "a");
+    renderServerStatus();
+    loadBookmarks();
     loadPrefs();
     bindEvents();
     buildChunks();
+    refreshServerStatus();
     refreshHealth();
   </script>
 </body>
