@@ -72,6 +72,29 @@ def trim_reference_text(text: str, keep_ratio: float) -> tuple[str, bool]:
     return clean[:target].strip(), True
 
 
+def decode_audio_bytes(audio_bytes: bytes, target_rate: int = 16000) -> tuple[np.ndarray, int]:
+    try:
+        wav, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
+    except Exception as exc:
+        raise ValueError(
+            "Could not decode audio directly. Record in the reader or upload a WAV file; "
+            "MP3/M4A/WebM uploads require ffmpeg."
+        ) from exc
+
+    if wav.ndim == 2:
+        wav = wav.mean(axis=1)
+    if not wav.size:
+        raise ValueError("Audio sample is empty.")
+
+    wav = np.asarray(wav, dtype=np.float32)
+    if sample_rate != target_rate:
+        from librosa import resample
+
+        wav = resample(y=wav, orig_sr=sample_rate, target_sr=target_rate).astype(np.float32)
+        sample_rate = target_rate
+    return np.ascontiguousarray(wav), sample_rate
+
+
 class NeuTTSState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -234,10 +257,8 @@ class NeuTTSState:
         saved_transcript = transcript
 
         with self.encode_lock:
-            from librosa import load
-
             codec = self.get_encoder_codec()
-            wav, _ = load(audio_path, sr=16000, mono=True)
+            wav, _ = decode_audio_bytes(audio_bytes, target_rate=16000)
             max_samples = int(self.args.max_reference_seconds * 16000)
             trimmed = False
             keep_ratio = 1.0
@@ -286,25 +307,17 @@ class NeuTTSState:
         if len(audio_bytes) > self.args.max_reference_mb * 1024 * 1024:
             raise ValueError(f"Audio sample is larger than {self.args.max_reference_mb} MB.")
 
-        TMP.mkdir(exist_ok=True)
-        audio_path = TMP / f"transcribe-{time.time_ns()}.wav"
-        audio_path.write_bytes(audio_bytes)
-        try:
-            transcriber = self.get_transcriber()
-            started = time.perf_counter()
-            with self.transcribe_lock:
-                result = transcriber(str(audio_path))
-            text = str(result.get("text", "")).strip()
-            return {
-                "text": text,
-                "elapsed": time.perf_counter() - started,
-                "model": self.args.asr_model,
-            }
-        finally:
-            try:
-                audio_path.unlink()
-            except OSError:
-                pass
+        wav, sample_rate = decode_audio_bytes(audio_bytes, target_rate=16000)
+        transcriber = self.get_transcriber()
+        started = time.perf_counter()
+        with self.transcribe_lock:
+            result = transcriber({"raw": wav, "sampling_rate": sample_rate})
+        text = str(result.get("text", "")).strip()
+        return {
+            "text": text,
+            "elapsed": time.perf_counter() - started,
+            "model": self.args.asr_model,
+        }
 
     def speak(self, payload: dict) -> tuple[bytes, dict]:
         text = str(payload.get("text", "")).strip()
