@@ -90,6 +90,7 @@ Use the reader's `Engine` select to switch between Kokoro and NeuTTS Nano.
 
 - Kokoro is the faster/default path and can use CUDA when the local PyTorch install supports it.
 - NeuTTS Nano currently runs through the isolated `.venv-neutts` setup. In this project it is configured for CPU by default because the tested GPU path required a CUDA-enabled `llama-cpp-python` build.
-- Creating a custom NeuTTS voice loads the full NeuCodec encoder and can take several minutes the first time. The reference transcript should match the audio closely.
+- Creating a custom NeuTTS voice loads the full NeuCodec encoder and can take several minutes the first time. The UI shows elapsed recording/encoding time while it runs.
+- Custom NeuTTS references are trimmed to about 12 seconds / 650 speech codes by default so they fit Nano's 2048-token context window. The reference transcript should match the retained audio closely.
 - Custom voice reference files are saved under `samples/neutts/custom/` and ignored by Git by default to avoid committing personal voice data accidentally.
 - Generated WAV files, logs, model caches, and virtual environments are intentionally ignored by Git.

@@ -126,6 +126,8 @@ class NeuTTSState:
 
         codes_path, text_path = paths
         ref_codes = torch.load(codes_path, map_location="cpu")
+        if ref_codes.numel() > self.args.max_reference_codes:
+            ref_codes = ref_codes.flatten()[: self.args.max_reference_codes]
         ref_text = text_path.read_text(encoding="utf-8").strip()
         self.refs[voice] = (ref_codes, ref_text)
         return self.refs[voice]
@@ -186,9 +188,18 @@ class NeuTTSState:
 
             codec = self.get_encoder_codec()
             wav, _ = load(audio_path, sr=16000, mono=True)
+            max_samples = int(self.args.max_reference_seconds * 16000)
+            trimmed = False
+            if len(wav) > max_samples:
+                wav = wav[:max_samples]
+                trimmed = True
+            sf.write(audio_path, wav, 16000, format="WAV", subtype="PCM_16")
             wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)
             with torch.no_grad():
                 ref_codes = codec.encode_code(audio_or_path=wav_tensor).squeeze(0).squeeze(0)
+            if ref_codes.numel() > self.args.max_reference_codes:
+                ref_codes = ref_codes.flatten()[: self.args.max_reference_codes]
+                trimmed = True
             torch.save(ref_codes.cpu(), codes_path)
 
         self.refs.pop(name, None)
@@ -200,6 +211,8 @@ class NeuTTSState:
             "codes_path": str(codes_path.relative_to(ROOT)),
             "text_path": str(text_path.relative_to(ROOT)),
             "seconds": len(wav) / 16000,
+            "codes": int(ref_codes.numel()),
+            "trimmed": trimmed,
         }
 
     def speak(self, payload: dict) -> tuple[bytes, dict]:
@@ -233,6 +246,7 @@ class NeuTTSState:
             "backbone_device": self.args.backbone_device,
             "codec_device": self.args.codec_device,
             "chars": len(text),
+            "reference_codes": int(ref_codes.numel()),
             "peak": float(np.max(np.abs(wav))) if wav.size else 0.0,
             "rms": float(np.sqrt(np.mean(wav.astype(np.float64) ** 2))) if wav.size else 0.0,
         }
@@ -335,6 +349,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-chars", type=int, default=500)
     parser.add_argument("--encoder-device", default="cpu")
     parser.add_argument("--max-reference-mb", type=int, default=30)
+    parser.add_argument("--max-reference-seconds", type=float, default=12.0)
+    parser.add_argument("--max-reference-codes", type=int, default=650)
     parser.add_argument("--preload", action="store_true", help="Load NeuTTS before accepting requests.")
     return parser.parse_args()
 

@@ -643,7 +643,8 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       serverHealth: {},
       pendingCurrent: null,
       voiceSample: null,
-      recorder: null
+      recorder: null,
+      progressTimer: null
     };
 
     function fillSelect(id, values, selected) {
@@ -690,6 +691,24 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       state.voiceSample = { blob, label };
       $("voiceSampleStatus").textContent = `${label} | ${(blob.size / 1024).toFixed(1)} KB`;
       $("saveVoice").disabled = false;
+    }
+
+    function clearProgressTimer() {
+      if (state.progressTimer) {
+        clearInterval(state.progressTimer);
+        state.progressTimer = null;
+      }
+    }
+
+    function startElapsedStatus(label, target = "voiceSampleStatus") {
+      clearProgressTimer();
+      const started = performance.now();
+      const update = () => {
+        const seconds = Math.floor((performance.now() - started) / 1000);
+        $(target).textContent = `${label} ${seconds}s`;
+      };
+      update();
+      state.progressTimer = setInterval(update, 1000);
     }
 
     function blobToDataUrl(blob) {
@@ -1262,7 +1281,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       $("recordMic").disabled = true;
       $("recordSystem").disabled = true;
       $("uploadVoiceAudio").disabled = true;
-      $("voiceSampleStatus").textContent = kind === "system" ? "Recording shared audio..." : "Recording microphone...";
+      startElapsedStatus(kind === "system" ? "Recording shared audio..." : "Recording microphone...");
     }
 
     async function stopVoiceRecording() {
@@ -1274,6 +1293,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       recorder.stream.getTracks().forEach((track) => track.stop());
       const sampleRate = recorder.audioContext.sampleRate;
       await recorder.audioContext.close();
+      clearProgressTimer();
 
       const samples = flattenAudioChunks(recorder.chunks);
       const blob = encodeWav(samples, sampleRate);
@@ -1295,25 +1315,30 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
 
       $("saveVoice").disabled = true;
       setStatus("Encoding voice");
-      $("voiceSampleStatus").textContent = "Encoding custom voice...";
+      startElapsedStatus("Encoding custom voice... first encode can take several minutes.");
       const audioData = await blobToDataUrl(state.voiceSample.blob);
-      const response = await fetch(`${engineEndpoints.neutts}/api/voices`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, transcript, audio_base64: audioData })
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Voice encoding failed.");
+      try {
+        const response = await fetch(`${engineEndpoints.neutts}/api/voices`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, transcript, audio_base64: audioData })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Voice encoding failed.");
 
-      await refreshNeuttsVoices(data.voice.id);
-      $("engine").value = "neutts";
-      syncEngineControls(data.voice.id);
-      $("voice").value = data.voice.id;
-      savePrefs();
-      refreshServerStatus();
-      setStatus("Voice saved");
-      $("voiceSampleStatus").textContent = `Saved ${data.voice.id}.`;
-      log(`Saved NeuTTS voice '${data.voice.id}' from ${data.voice.seconds.toFixed(1)}s reference audio.`);
+        await refreshNeuttsVoices(data.voice.id);
+        $("engine").value = "neutts";
+        syncEngineControls(data.voice.id);
+        $("voice").value = data.voice.id;
+        savePrefs();
+        refreshServerStatus();
+        setStatus("Voice saved");
+        const trimmed = data.voice.trimmed ? " Trimmed to fit Nano context." : "";
+        $("voiceSampleStatus").textContent = `Saved ${data.voice.id}. ${data.voice.codes} reference codes.${trimmed}`;
+        log(`Saved NeuTTS voice '${data.voice.id}' from ${data.voice.seconds.toFixed(1)}s reference audio with ${data.voice.codes} codes.${trimmed}`);
+      } finally {
+        clearProgressTimer();
+      }
     }
 
     async function testTone() {
