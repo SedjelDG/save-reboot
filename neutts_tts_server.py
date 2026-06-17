@@ -324,10 +324,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Local browser server for NeuTTS Air.")
+    parser = argparse.ArgumentParser(description="Local browser server for NeuTTS Nano.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7861)
-    parser.add_argument("--backbone", default="neuphonic/neutts-air-q4-gguf")
+    parser.add_argument("--backbone", default="neuphonic/neutts-nano-q4-gguf")
     parser.add_argument("--codec", default="neuphonic/neucodec-onnx-decoder")
     parser.add_argument("--backbone-device", default="cpu", choices=["cpu", "gpu"])
     parser.add_argument("--codec-device", default="cpu")

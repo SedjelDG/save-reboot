@@ -5,14 +5,14 @@ Local browser reader for long text/webnovel-style chapters with sentence or para
 Current engines:
 
 - Kokoro on `http://127.0.0.1:7860`
-- NeuTTS Air on `http://127.0.0.1:7861`
+- NeuTTS Nano on `http://127.0.0.1:7861`
 - Experimental Qwen3-TTS scripts are included, but Kokoro and NeuTTS are the reader-integrated paths.
 
 ## Files
 
 - `kokoro_tts_server.py` serves the reader UI and Kokoro `/api/speak`.
 - `kokoro_reader.html` is the browser reader UI.
-- `neutts_tts_server.py` serves NeuTTS Air `/api/speak`.
+- `neutts_tts_server.py` serves NeuTTS Nano `/api/speak`.
 - `qwen3_tts_server.py` is the earlier Qwen3-TTS local test server.
 - `setup.ps1` recreates the Kokoro and NeuTTS virtual environments.
 - `start_all.ps1` starts Kokoro and NeuTTS together.
@@ -74,7 +74,7 @@ Open:
 http://127.0.0.1:7860
 ```
 
-Use the reader's `Engine` select to switch between Kokoro and NeuTTS Air.
+Use the reader's `Engine` select to switch between Kokoro and NeuTTS Nano.
 
 ## Reader Features
 
@@ -89,7 +89,7 @@ Use the reader's `Engine` select to switch between Kokoro and NeuTTS Air.
 ## Notes
 
 - Kokoro is the faster/default path and can use CUDA when the local PyTorch install supports it.
-- NeuTTS Air currently runs through the isolated `.venv-neutts` setup. In this project it is configured for CPU by default because the tested GPU path required a CUDA-enabled `llama-cpp-python` build.
+- NeuTTS Nano currently runs through the isolated `.venv-neutts` setup. In this project it is configured for CPU by default because the tested GPU path required a CUDA-enabled `llama-cpp-python` build.
 - Creating a custom NeuTTS voice loads the full NeuCodec encoder and can take several minutes the first time. The reference transcript should match the audio closely.
 - Custom voice reference files are saved under `samples/neutts/custom/` and ignored by Git by default to avoid committing personal voice data accidentally.
 - Generated WAV files, logs, model caches, and virtual environments are intentionally ignored by Git.

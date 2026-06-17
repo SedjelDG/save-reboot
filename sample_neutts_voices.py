@@ -25,7 +25,7 @@ SPEAKERS = ["jo", "dave", "greta", "juliette", "mateo"]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate NeuTTS Air samples for bundled voices.")
+    parser = argparse.ArgumentParser(description="Generate NeuTTS Nano samples for bundled voices.")
     parser.add_argument(
         "--text",
         default=(
@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--speaker", choices=SPEAKERS + ["all"], default="all")
     parser.add_argument("--output-dir", default="neutts_samples")
-    parser.add_argument("--backbone", default="neuphonic/neutts-air-q4-gguf")
+    parser.add_argument("--backbone", default="neuphonic/neutts-nano-q4-gguf")
     parser.add_argument("--codec", default="neuphonic/neucodec-onnx-decoder")
     parser.add_argument("--backbone-device", default="cpu", choices=["cpu", "gpu"])
     parser.add_argument("--codec-device", default="cpu")

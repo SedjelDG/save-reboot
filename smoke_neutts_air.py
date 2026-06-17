@@ -26,10 +26,10 @@ from neutts import NeuTTS  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="NeuTTS Air Q4 smoke test.")
-    parser.add_argument("--text", default="This is NeuTTS Air voice cloning running locally.")
+    parser = argparse.ArgumentParser(description="NeuTTS Nano Q4 smoke test.")
+    parser.add_argument("--text", default="This is NeuTTS Nano voice cloning running locally.")
     parser.add_argument("--output", default="neutts_air_output.wav")
-    parser.add_argument("--backbone", default="neuphonic/neutts-air-q4-gguf")
+    parser.add_argument("--backbone", default="neuphonic/neutts-nano-q4-gguf")
     parser.add_argument("--codec", default="neuphonic/neucodec-onnx-decoder")
     parser.add_argument("--backbone-device", default="cpu", choices=["cpu", "gpu"])
     parser.add_argument("--codec-device", default="cpu")
