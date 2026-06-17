@@ -1,0 +1,978 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local TTS Reader</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f6f3;
+      color: #202522;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #f5f6f3;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      min-height: 38px;
+      border: 0;
+      border-radius: 8px;
+      padding: 9px 12px;
+      background: #245e4f;
+      color: #fff;
+      font-weight: 740;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.58;
+    }
+
+    button.secondary { background: #626c66; }
+    button.warning { background: #8a4d35; }
+    button.ghost {
+      border: 1px solid #b8c2bc;
+      background: #fffef9;
+      color: #202522;
+    }
+
+    .app {
+      width: min(1420px, calc(100% - 28px));
+      margin: 0 auto;
+      padding: 18px 0 28px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.1;
+      font-weight: 780;
+    }
+
+    .status {
+      min-width: 220px;
+      padding: 9px 12px;
+      border: 1px solid #c7d0ca;
+      border-radius: 8px;
+      background: #fffef9;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: repeat(9, minmax(0, auto)) minmax(180px, 1fr);
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .toolbar .progress-shell {
+      min-width: 180px;
+      height: 10px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #d7ddd8;
+    }
+
+    .toolbar .progress-bar {
+      width: 0%;
+      height: 100%;
+      background: #245e4f;
+      transition: width 160ms ease;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 290px minmax(0, 1fr) 320px;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .panel,
+    .reader-shell,
+    .queue-shell {
+      border: 1px solid #c7d0ca;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.82);
+    }
+
+    .panel {
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+    }
+
+    .panel h2,
+    .queue-shell h2 {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.2;
+      font-weight: 780;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    select,
+    input,
+    textarea {
+      width: 100%;
+      border: 1px solid #b8c2bc;
+      border-radius: 7px;
+      background: #fffef9;
+      color: #202522;
+    }
+
+    select,
+    input {
+      min-height: 36px;
+      padding: 8px 9px;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .check {
+      grid-template-columns: 18px 1fr;
+      align-items: center;
+      font-weight: 560;
+    }
+
+    .check input {
+      width: 18px;
+      height: 18px;
+      min-height: 18px;
+    }
+
+    .reader-shell {
+      min-height: calc(100vh - 122px);
+      overflow: hidden;
+    }
+
+    .view-tabs {
+      display: flex;
+      gap: 8px;
+      padding: 10px;
+      border-bottom: 1px solid #c7d0ca;
+      background: #fbfbf7;
+    }
+
+    .view-tabs button.active {
+      background: #245e4f;
+      color: #fff;
+    }
+
+    .view-tabs button:not(.active) {
+      background: #fffef9;
+      color: #202522;
+      border: 1px solid #b8c2bc;
+    }
+
+    .reader,
+    .source {
+      height: calc(100vh - 256px);
+      min-height: 420px;
+    }
+
+    .reader {
+      overflow: auto;
+      padding: 26px clamp(18px, 4vw, 52px);
+      background: #fffef9;
+      font: 20px/1.78 Georgia, "Times New Roman", serif;
+    }
+
+    .source {
+      display: none;
+      resize: none;
+      padding: 18px;
+      border: 0;
+      border-radius: 0;
+      font: 17px/1.65 Georgia, "Times New Roman", serif;
+    }
+
+    .reader-shell.source-mode .reader { display: none; }
+    .reader-shell.source-mode .source { display: block; }
+
+    .chunk {
+      border-radius: 4px;
+      padding: 1px 2px;
+      cursor: pointer;
+      transition: background 120ms ease, box-shadow 120ms ease;
+    }
+
+    .chunk:hover {
+      background: #edf2ee;
+    }
+
+    .chunk.current {
+      background: #d8eee2;
+      box-shadow: 0 0 0 2px #b4dcc8;
+    }
+
+    .chunk.cached {
+      text-decoration: underline;
+      text-decoration-color: #b4dcc8;
+      text-decoration-thickness: 2px;
+      text-underline-offset: 4px;
+    }
+
+    .reader-footer {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 10px;
+      border-top: 1px solid #c7d0ca;
+      background: #fbfbf7;
+    }
+
+    audio {
+      width: 100%;
+    }
+
+    .counter {
+      min-width: 110px;
+      font-size: 13px;
+      text-align: right;
+      color: #45514b;
+    }
+
+    .queue-shell {
+      overflow: hidden;
+    }
+
+    .queue-head {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border-bottom: 1px solid #c7d0ca;
+    }
+
+    .queue-list {
+      height: calc(100vh - 226px);
+      min-height: 420px;
+      overflow: auto;
+    }
+
+    .queue-item {
+      display: grid;
+      gap: 4px;
+      width: 100%;
+      padding: 10px 12px;
+      border: 0;
+      border-bottom: 1px solid #e0e5e1;
+      border-radius: 0;
+      background: #fffef9;
+      color: #202522;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .queue-item.current {
+      background: #d8eee2;
+    }
+
+    .queue-item .idx {
+      font: 12px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+      color: #63716a;
+    }
+
+    .queue-item .txt {
+      display: -webkit-box;
+      overflow: hidden;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      font-size: 13px;
+      line-height: 1.35;
+      font-weight: 520;
+    }
+
+    .log {
+      min-height: 120px;
+      max-height: 220px;
+      overflow: auto;
+      margin: 0;
+      padding: 10px;
+      border: 1px solid #d3d9d5;
+      border-radius: 8px;
+      background: #1f2523;
+      color: #dfe8e2;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    @media (max-width: 1080px) {
+      .workspace {
+        grid-template-columns: 260px minmax(0, 1fr);
+      }
+
+      .queue-shell {
+        grid-column: 1 / -1;
+      }
+
+      .queue-list {
+        height: 260px;
+        min-height: 260px;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .app {
+        width: min(100% - 18px, 720px);
+        padding-top: 12px;
+      }
+
+      header,
+      .workspace,
+      .toolbar {
+        grid-template-columns: 1fr;
+      }
+
+      .status {
+        text-align: left;
+      }
+
+      .toolbar {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .toolbar .progress-shell {
+        grid-column: 1 / -1;
+      }
+
+      .reader,
+      .source {
+        height: 58vh;
+        min-height: 360px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Local TTS Reader</h1>
+      <div class="status" id="status">Checking server...</div>
+    </header>
+
+    <nav class="toolbar">
+      <button id="openFile" class="ghost" type="button">Open</button>
+      <button id="buildQueue" type="button">Build</button>
+      <button id="play" type="button">Play</button>
+      <button id="pause" class="secondary" type="button">Pause</button>
+      <button id="stop" class="warning" type="button">Stop</button>
+      <button id="prev" class="ghost" type="button">Prev</button>
+      <button id="next" class="ghost" type="button">Next</button>
+      <button id="cacheAll" class="ghost" type="button">Cache</button>
+      <button id="download" class="ghost" type="button">Save</button>
+      <div class="progress-shell"><div class="progress-bar" id="progressBar"></div></div>
+    </nav>
+
+    <input id="fileInput" class="hidden" type="file" accept=".txt,.md,.html,.htm,text/plain,text/markdown,text/html" />
+
+    <div class="workspace">
+      <aside class="panel">
+        <h2>Voice</h2>
+        <label>
+          Engine
+          <select id="engine"></select>
+        </label>
+        <label>
+          Voice
+          <select id="voice"></select>
+        </label>
+        <label>
+          Language
+          <select id="language"></select>
+        </label>
+        <div class="split">
+          <label>
+            Speed
+            <input id="speed" type="number" min="0.6" max="1.5" step="0.05" value="1.0" />
+          </label>
+          <label>
+            Volume
+            <input id="volume" type="number" min="0" max="1" step="0.05" value="1.0" />
+          </label>
+        </div>
+
+        <h2>Queue</h2>
+        <label>
+          Mode
+          <select id="chunkMode">
+            <option value="sentence">Sentence</option>
+            <option value="paragraph">Paragraph</option>
+          </select>
+        </label>
+        <label>
+          Max chars
+          <input id="maxChars" type="number" min="80" max="1400" step="20" value="360" />
+        </label>
+        <label class="check">
+          <input id="autoScroll" type="checkbox" checked />
+          Auto-scroll
+        </label>
+        <label class="check">
+          <input id="prefetch" type="checkbox" checked />
+          Prefetch
+        </label>
+        <label class="check">
+          <input id="cacheAudio" type="checkbox" checked />
+          Cache audio
+        </label>
+        <button id="tone" class="secondary" type="button">Test Tone</button>
+        <button id="clearCache" class="ghost" type="button">Clear Cache</button>
+        <pre id="log" class="log"></pre>
+      </aside>
+
+      <section class="reader-shell" id="readerShell">
+        <div class="view-tabs">
+          <button id="readTab" class="active" type="button">Read</button>
+          <button id="sourceTab" type="button">Source</button>
+        </div>
+        <article id="reader" class="reader"></article>
+        <textarea id="source" class="source">Chapter 1
+
+Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build the queue, and press play. The current chunk will stay highlighted while audio plays.</textarea>
+        <div class="reader-footer">
+          <audio id="audio" controls></audio>
+          <div class="counter" id="counter">0 / 0</div>
+        </div>
+      </section>
+
+      <section class="queue-shell">
+        <div class="queue-head">
+          <h2>Chunks</h2>
+          <div class="counter" id="queueStats">0 chunks</div>
+        </div>
+        <div id="queueList" class="queue-list"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const voices = __VOICES__;
+    const neuttsVoices = ["jo", "dave", "greta", "juliette", "mateo"];
+    const languages = __LANGUAGES__;
+    const engines = [
+      ["kokoro", "Kokoro"],
+      ["neutts", "NeuTTS Air"]
+    ];
+    const engineLabels = Object.fromEntries(engines);
+    const engineEndpoints = {
+      kokoro: "",
+      neutts: "http://127.0.0.1:7861"
+    };
+    const $ = (id) => document.getElementById(id);
+
+    const state = {
+      chunks: [],
+      current: -1,
+      playing: false,
+      cancel: false,
+      jump: null,
+      cache: new Map(),
+      currentUrl: null,
+      currentBlob: null,
+      currentMeta: null,
+      playbackResolve: null
+    };
+
+    function fillSelect(id, values, selected) {
+      const select = $(id);
+      select.innerHTML = values.map((item) => {
+        const value = Array.isArray(item) ? item[0] : item;
+        const label = Array.isArray(item) ? item[1] : item;
+        const attr = value === selected ? " selected" : "";
+        return `<option value="${value}"${attr}>${label}</option>`;
+      }).join("");
+    }
+
+    function voiceChoicesForEngine(engine) {
+      return engine === "neutts" ? neuttsVoices : voices;
+    }
+
+    function voiceAvailable(engine, voice) {
+      return voiceChoicesForEngine(engine).some((item) => (Array.isArray(item) ? item[0] : item) === voice);
+    }
+
+    function syncEngineControls(preferredVoice) {
+      const engine = $("engine").value || "kokoro";
+      const fallback = engine === "neutts" ? "jo" : "af_heart";
+      const voice = voiceAvailable(engine, preferredVoice) ? preferredVoice : fallback;
+      fillSelect("voice", voiceChoicesForEngine(engine), voice);
+      $("language").disabled = engine === "neutts";
+      $("speed").disabled = engine === "neutts";
+    }
+
+    function apiUrl(path) {
+      const endpoint = engineEndpoints[settings().engine] || "";
+      return `${endpoint}${path}`;
+    }
+
+    function log(message) {
+      $("log").textContent = message;
+    }
+
+    function settings() {
+      return {
+        engine: $("engine").value || "kokoro",
+        voice: $("voice").value,
+        lang_code: $("language").value,
+        speed: Number($("speed").value),
+        volume: Number($("volume").value),
+        mode: $("chunkMode").value,
+        maxChars: Number($("maxChars").value),
+        autoScroll: $("autoScroll").checked,
+        prefetch: $("prefetch").checked,
+        cacheAudio: $("cacheAudio").checked
+      };
+    }
+
+    function savePrefs() {
+      const data = settings();
+      data.source = $("source").value;
+      localStorage.setItem("kokoro-reader-prefs", JSON.stringify(data));
+    }
+
+    function loadPrefs() {
+      try {
+        const data = JSON.parse(localStorage.getItem("kokoro-reader-prefs") || "{}");
+        if (data.source) $("source").value = data.source;
+        if (data.engine) $("engine").value = data.engine;
+        syncEngineControls(data.voice);
+        if (data.lang_code) $("language").value = data.lang_code;
+        if (data.speed) $("speed").value = data.speed;
+        if (data.volume !== undefined) $("volume").value = data.volume;
+        if (data.mode) $("chunkMode").value = data.mode;
+        if (data.maxChars) $("maxChars").value = data.maxChars;
+        if (data.autoScroll !== undefined) $("autoScroll").checked = data.autoScroll;
+        if (data.prefetch !== undefined) $("prefetch").checked = data.prefetch;
+        if (data.cacheAudio !== undefined) $("cacheAudio").checked = data.cacheAudio;
+      } catch {}
+    }
+
+    function stripHtml(text) {
+      const doc = new DOMParser().parseFromString(text, "text/html");
+      return doc.body.textContent || text;
+    }
+
+    function sourceText() {
+      const text = $("source").value;
+      return /<\\s*(p|br|div|span|article|body|html)\\b/i.test(text) ? stripHtml(text) : text;
+    }
+
+    function sentenceUnits(text) {
+      const clean = text.replace(/\\r/g, "").replace(/[ \\t]+/g, " ").trim();
+      if (!clean) return [];
+      if ("Segmenter" in Intl) {
+        const segmenter = new Intl.Segmenter("en", { granularity: "sentence" });
+        return Array.from(segmenter.segment(clean), (part) => part.segment.trim()).filter(Boolean);
+      }
+      return clean.match(/[^.!?]+[.!?]+["')\\]]*|[^.!?]+$/g)?.map((x) => x.trim()).filter(Boolean) || [clean];
+    }
+
+    function paragraphUnits(text) {
+      return text.replace(/\\r/g, "").split(/\\n{2,}/).map((x) => x.replace(/\\s+/g, " ").trim()).filter(Boolean);
+    }
+
+    function packUnits(units, maxChars) {
+      const chunks = [];
+      let current = "";
+      for (const unit of units) {
+        if (!current) {
+          current = unit;
+        } else if ((current + " " + unit).length <= maxChars) {
+          current += " " + unit;
+        } else {
+          chunks.push(current);
+          current = unit;
+        }
+      }
+      if (current) chunks.push(current);
+      return chunks;
+    }
+
+    function buildChunks() {
+      savePrefs();
+      const config = settings();
+      const units = config.mode === "paragraph" ? paragraphUnits(sourceText()) : sentenceUnits(sourceText());
+      state.chunks = packUnits(units, config.maxChars).map((text, index) => ({ id: index, text }));
+      state.current = state.chunks.length ? 0 : -1;
+      state.cancel = false;
+      state.jump = null;
+      renderAll();
+      setStatus(state.chunks.length ? "Queue ready" : "No text");
+      log(`${state.chunks.length} chunks built.`);
+    }
+
+    function escapeHtml(text) {
+      return text.replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      })[char]);
+    }
+
+    function renderReader() {
+      $("reader").innerHTML = state.chunks.map((chunk, index) => {
+        const cls = [
+          "chunk",
+          index === state.current ? "current" : "",
+          hasCached(index) ? "cached" : ""
+        ].filter(Boolean).join(" ");
+        return `<span class="${cls}" data-index="${index}">${escapeHtml(chunk.text)}</span> `;
+      }).join("");
+    }
+
+    function renderQueue() {
+      $("queueList").innerHTML = state.chunks.map((chunk, index) => {
+        const cls = index === state.current ? "queue-item current" : "queue-item";
+        const cached = hasCached(index) ? " cached" : "";
+        return `<button class="${cls}" data-index="${index}" type="button"><span class="idx">${index + 1}${cached}</span><span class="txt">${escapeHtml(chunk.text)}</span></button>`;
+      }).join("");
+      $("queueStats").textContent = `${state.chunks.length} chunks`;
+    }
+
+    function renderAll() {
+      renderReader();
+      renderQueue();
+      updateCounter();
+      updateProgress();
+    }
+
+    function selectChunk(index, scroll = true) {
+      if (!state.chunks[index]) return;
+      state.current = index;
+      renderAll();
+      if (scroll && settings().autoScroll) scrollCurrentIntoView();
+    }
+
+    function scrollCurrentIntoView() {
+      const chunk = document.querySelector(`.chunk[data-index="${state.current}"]`);
+      if (chunk) chunk.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    function updateCounter() {
+      const total = state.chunks.length;
+      $("counter").textContent = total ? `${state.current + 1} / ${total}` : "0 / 0";
+    }
+
+    function updateProgress() {
+      const total = state.chunks.length;
+      const pct = total ? ((state.current + 1) / total) * 100 : 0;
+      $("progressBar").style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    }
+
+    function setStatus(text) {
+      $("status").textContent = text;
+    }
+
+    function cacheKey(index) {
+      const config = settings();
+      const chunk = state.chunks[index];
+      return JSON.stringify({
+        engine: config.engine,
+        text: chunk?.text || "",
+        voice: config.voice,
+        lang_code: config.lang_code,
+        speed: config.speed
+      });
+    }
+
+    function hasCached(index) {
+      return state.cache.has(cacheKey(index));
+    }
+
+    async function ensureAudio(index) {
+      const chunk = state.chunks[index];
+      if (!chunk) throw new Error("Missing chunk.");
+
+      const key = cacheKey(index);
+      if (settings().cacheAudio && state.cache.has(key)) {
+        return state.cache.get(key);
+      }
+
+      const started = performance.now();
+      const config = settings();
+      const response = await fetch(apiUrl("/api/speak"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: chunk.text,
+          voice: config.voice,
+          lang_code: config.lang_code,
+          speed: config.speed,
+          max_chars: config.maxChars
+        })
+      });
+
+      if (!response.ok) throw new Error(await response.text());
+
+      const blob = await response.blob();
+      const meta = response.headers.get("X-TTS-Metadata") || "";
+      const item = { blob, meta, elapsed: (performance.now() - started) / 1000 };
+      if (settings().cacheAudio) state.cache.set(key, item);
+      return item;
+    }
+
+    function waitForAudio() {
+      return new Promise((resolve) => {
+        state.playbackResolve = resolve;
+        const done = (reason) => {
+          $("audio").removeEventListener("ended", onEnded);
+          $("audio").removeEventListener("error", onError);
+          state.playbackResolve = null;
+          resolve(reason);
+        };
+        const onEnded = () => done("ended");
+        const onError = () => done("error");
+        $("audio").addEventListener("ended", onEnded, { once: true });
+        $("audio").addEventListener("error", onError, { once: true });
+      });
+    }
+
+    async function playQueue(startIndex = state.current >= 0 ? state.current : 0) {
+      if (!state.chunks.length) buildChunks();
+      if (!state.chunks.length) return;
+
+      state.cancel = false;
+      state.playing = true;
+      $("cacheAll").disabled = true;
+
+      for (let index = startIndex; index < state.chunks.length; index += 1) {
+        if (state.cancel) break;
+        selectChunk(index);
+        setStatus(`Generating ${index + 1}`);
+        try {
+          const audioItem = await ensureAudio(index);
+          state.currentBlob = audioItem.blob;
+          state.currentMeta = audioItem.meta;
+          if (state.currentUrl) URL.revokeObjectURL(state.currentUrl);
+          state.currentUrl = URL.createObjectURL(audioItem.blob);
+          $("audio").src = state.currentUrl;
+          $("audio").volume = settings().volume;
+          setStatus(`Playing ${index + 1}`);
+          log(`Chunk ${index + 1}/${state.chunks.length}\nGenerated in ${audioItem.elapsed.toFixed(2)}s\n${audioItem.meta}`);
+          if (settings().prefetch && index + 1 < state.chunks.length) {
+            ensureAudio(index + 1).then(() => {
+              renderAll();
+            }).catch(() => {});
+          }
+          await $("audio").play();
+          const reason = await waitForAudio();
+          renderAll();
+          if (state.jump !== null) {
+            index = state.jump - 1;
+            state.jump = null;
+          } else if (reason === "error") {
+            break;
+          }
+        } catch (error) {
+          setStatus("Error");
+          log(String(error.message || error));
+          break;
+        }
+      }
+
+      state.playing = false;
+      $("cacheAll").disabled = false;
+      if (!state.cancel) setStatus("Ready");
+    }
+
+    function pauseAudio() {
+      $("audio").pause();
+      setStatus("Paused");
+    }
+
+    function stopAudio() {
+      state.cancel = true;
+      state.jump = null;
+      $("audio").pause();
+      $("audio").currentTime = 0;
+      if (state.playbackResolve) state.playbackResolve("cancel");
+      setStatus("Stopped");
+    }
+
+    function jumpTo(index, play = false) {
+      if (!state.chunks[index]) return;
+      if (state.playing) {
+        state.jump = index;
+        if (state.playbackResolve) state.playbackResolve("jump");
+        $("audio").pause();
+      } else {
+        selectChunk(index);
+        if (play) playQueue(index);
+      }
+    }
+
+    async function cacheAll() {
+      if (!state.chunks.length) buildChunks();
+      if (!state.chunks.length) return;
+      $("cacheAll").disabled = true;
+      try {
+        for (let index = 0; index < state.chunks.length; index += 1) {
+          setStatus(`Caching ${index + 1}`);
+          await ensureAudio(index);
+          renderAll();
+          if (state.cancel) break;
+        }
+        setStatus("Cached");
+      } catch (error) {
+        setStatus("Error");
+        log(String(error.message || error));
+      } finally {
+        $("cacheAll").disabled = false;
+      }
+    }
+
+    async function testTone() {
+      setStatus("Playing tone");
+      const response = await fetch(apiUrl("/api/tone"));
+      const blob = await response.blob();
+      if (state.currentUrl) URL.revokeObjectURL(state.currentUrl);
+      state.currentUrl = URL.createObjectURL(blob);
+      $("audio").src = state.currentUrl;
+      await $("audio").play();
+      log("Tone OK.");
+    }
+
+    function downloadCurrent() {
+      if (!state.currentBlob) {
+        log("No current audio.");
+        return;
+      }
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(state.currentBlob);
+      link.download = `${settings().engine}-chunk-${state.current + 1}.wav`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    }
+
+    async function refreshHealth() {
+      const engine = settings().engine;
+      try {
+        const response = await fetch(apiUrl("/api/health"));
+        const data = await response.json();
+        const label = engineLabels[engine] || engine;
+        setStatus(data.pipeline_loaded ? `${label} loaded` : `${label} ready`);
+      } catch (error) {
+        setStatus(`${engineLabels[engine] || engine} unavailable`);
+      }
+    }
+
+    function bindEvents() {
+      $("openFile").addEventListener("click", () => $("fileInput").click());
+      $("fileInput").addEventListener("change", async (event) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        $("source").value = await file.text();
+        state.cache.clear();
+        buildChunks();
+      });
+      $("buildQueue").addEventListener("click", buildChunks);
+      $("play").addEventListener("click", () => {
+        if (state.playing) {
+          if ($("audio").paused) {
+            $("audio").play();
+            setStatus("Playing");
+          }
+          return;
+        }
+        playQueue();
+      });
+      $("pause").addEventListener("click", pauseAudio);
+      $("stop").addEventListener("click", stopAudio);
+      $("prev").addEventListener("click", () => jumpTo(Math.max(0, state.current - 1), state.playing));
+      $("next").addEventListener("click", () => jumpTo(Math.min(state.chunks.length - 1, state.current + 1), state.playing));
+      $("cacheAll").addEventListener("click", cacheAll);
+      $("download").addEventListener("click", downloadCurrent);
+      $("tone").addEventListener("click", testTone);
+      $("engine").addEventListener("change", () => {
+        syncEngineControls();
+        savePrefs();
+        renderAll();
+        refreshHealth();
+      });
+      $("readTab").addEventListener("click", () => {
+        $("readerShell").classList.remove("source-mode");
+        $("readTab").classList.add("active");
+        $("sourceTab").classList.remove("active");
+      });
+      $("sourceTab").addEventListener("click", () => {
+        $("readerShell").classList.add("source-mode");
+        $("sourceTab").classList.add("active");
+        $("readTab").classList.remove("active");
+      });
+      $("reader").addEventListener("click", (event) => {
+        const node = event.target.closest(".chunk");
+        if (node) jumpTo(Number(node.dataset.index), false);
+      });
+      $("queueList").addEventListener("click", (event) => {
+        const node = event.target.closest(".queue-item");
+        if (node) jumpTo(Number(node.dataset.index), false);
+      });
+      ["voice", "language", "speed", "volume", "chunkMode", "maxChars", "autoScroll", "prefetch", "cacheAudio"].forEach((id) => {
+        $(id).addEventListener("change", savePrefs);
+      });
+      $("source").addEventListener("input", () => {
+        savePrefs();
+      });
+      $("clearCache").addEventListener("click", () => {
+        state.cache.clear();
+        renderAll();
+        log("Cache cleared.");
+      });
+      $("audio").addEventListener("volumechange", () => {
+        $("volume").value = $("audio").volume.toFixed(2);
+        savePrefs();
+      });
+    }
+
+    fillSelect("engine", engines, "kokoro");
+    fillSelect("voice", voices, "af_heart");
+    fillSelect("language", languages, "a");
+    loadPrefs();
+    bindEvents();
+    buildChunks();
+    refreshHealth();
+  </script>
+</body>
+</html>

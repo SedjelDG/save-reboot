@@ -1,0 +1,26 @@
+# Python/runtime state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local environments and model/download caches
+.venv/
+.venv-neutts/
+.hf-cache/
+.tmp/
+
+# Runtime outputs
+*.log
+*.pid
+*.job
+*.wav
+
+# External cloned repos.
+/qwen3-tts/
+/neutts/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
