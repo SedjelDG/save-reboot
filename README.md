@@ -83,6 +83,7 @@ Use the reader's `Engine` select to switch between Kokoro and NeuTTS Nano.
 - JSON session export/import for text, settings, current position, and bookmarks.
 - Bookmarks tied to the current text.
 - NeuTTS custom voice references from uploaded audio, microphone recording, or browser shared-audio capture.
+- Auto transcript for custom voice references through a local Whisper ASR endpoint.
 - Chunk controls for sentence, paragraph, or line mode with min/max character bounds.
 - Queue caching, current-chunk highlighting, autoscroll, and save-current-audio support.
 
@@ -91,6 +92,7 @@ Use the reader's `Engine` select to switch between Kokoro and NeuTTS Nano.
 - Kokoro is the faster/default path and can use CUDA when the local PyTorch install supports it.
 - NeuTTS Nano currently runs through the isolated `.venv-neutts` setup. In this project it is configured for CPU by default because the tested GPU path required a CUDA-enabled `llama-cpp-python` build.
 - Creating a custom NeuTTS voice loads the full NeuCodec encoder and can take several minutes the first time. The UI shows elapsed recording/encoding time while it runs.
-- Custom NeuTTS references are trimmed to about 12 seconds / 650 speech codes by default so they fit Nano's 2048-token context window. The reference transcript should match the retained audio closely.
+- Auto transcript uses `openai/whisper-tiny.en` by default. First use may download/load the model and take time; verify the transcript manually before saving the voice.
+- Custom NeuTTS references are trimmed to about 12 seconds / 650 speech codes by default so they fit Nano's 2048-token context window. When trimming occurs, the saved reference transcript is trimmed too; best results still come from recording a short, exact 5-12 second reference in the style you want.
 - Custom voice reference files are saved under `samples/neutts/custom/` and ignored by Git by default to avoid committing personal voice data accidentally.
 - Generated WAV files, logs, model caches, and virtual environments are intentionally ignored by Git.

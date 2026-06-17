@@ -537,8 +537,9 @@
         </div>
         <div class="compact-actions">
           <button id="stopVoiceRecord" class="secondary" type="button" disabled>Stop</button>
-          <button id="saveVoice" type="button" disabled>Save Voice</button>
+          <button id="autoTranscript" class="ghost" type="button" disabled>Auto Transcript</button>
         </div>
+        <button id="saveVoice" type="button" disabled>Save Voice</button>
         <div id="voiceSampleStatus" class="small-note">No reference audio selected.</div>
 
         <h2>Queue</h2>
@@ -691,6 +692,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       state.voiceSample = { blob, label };
       $("voiceSampleStatus").textContent = `${label} | ${(blob.size / 1024).toFixed(1)} KB`;
       $("saveVoice").disabled = false;
+      $("autoTranscript").disabled = false;
     }
 
     function clearProgressTimer() {
@@ -1335,9 +1337,33 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
         setStatus("Voice saved");
         const trimmed = data.voice.trimmed ? " Trimmed to fit Nano context." : "";
         $("voiceSampleStatus").textContent = `Saved ${data.voice.id}. ${data.voice.codes} reference codes.${trimmed}`;
-        log(`Saved NeuTTS voice '${data.voice.id}' from ${data.voice.seconds.toFixed(1)}s reference audio with ${data.voice.codes} codes.${trimmed}`);
+        log(`Saved NeuTTS voice '${data.voice.id}' from ${data.voice.seconds.toFixed(1)}s reference audio with ${data.voice.codes} codes.${trimmed}\nReference text used: ${data.voice.transcript || transcript}`);
       } finally {
         clearProgressTimer();
+      }
+    }
+
+    async function autoTranscriptVoiceSample() {
+      if (!state.voiceSample) throw new Error("Select or record reference audio first.");
+
+      $("autoTranscript").disabled = true;
+      startElapsedStatus("Transcribing reference audio... first use may download/load Whisper.");
+      try {
+        const audioData = await blobToDataUrl(state.voiceSample.blob);
+        const response = await fetch(`${engineEndpoints.neutts}/api/transcribe`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ audio_base64: audioData })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Transcription failed.");
+
+        $("voiceTranscript").value = data.text;
+        $("voiceSampleStatus").textContent = `Transcript generated in ${data.elapsed.toFixed(1)}s.`;
+        log(`Auto transcript (${data.model}):\n${data.text}`);
+      } finally {
+        clearProgressTimer();
+        $("autoTranscript").disabled = !state.voiceSample;
       }
     }
 
@@ -1482,6 +1508,14 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
         } catch (error) {
           $("saveVoice").disabled = !state.voiceSample;
           setStatus("Voice error");
+          log(String(error.message || error));
+        }
+      });
+      $("autoTranscript").addEventListener("click", async () => {
+        try {
+          await autoTranscriptVoiceSample();
+        } catch (error) {
+          setStatus("Transcript error");
           log(String(error.message || error));
         }
       });

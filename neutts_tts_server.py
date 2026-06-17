@@ -47,15 +47,42 @@ def make_test_tone(sample_rate: int = 24000, seconds: float = 1.0, frequency: fl
     return audio.getvalue()
 
 
+def trim_reference_text(text: str, keep_ratio: float) -> tuple[str, bool]:
+    if keep_ratio >= 0.98:
+        return text.strip(), False
+
+    clean = re.sub(r"\s+", " ", text).strip()
+    if not clean:
+        return clean, False
+
+    target = max(32, int(len(clean) * max(0.05, min(1.0, keep_ratio))))
+    target = min(target, len(clean))
+    boundary = max(clean.rfind(".", 0, target), clean.rfind("!", 0, target), clean.rfind("?", 0, target))
+    if boundary >= 24:
+        target = boundary + 1
+    else:
+        forward = [pos for pos in (clean.find(".", target), clean.find("!", target), clean.find("?", target)) if pos != -1]
+        next_boundary = min(forward) if forward else -1
+        if next_boundary != -1 and next_boundary <= target + 80:
+            target = next_boundary + 1
+        else:
+            space = clean.rfind(" ", 0, target)
+            if space >= 24:
+                target = space
+    return clean[:target].strip(), True
+
+
 class NeuTTSState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.tts: NeuTTS | None = None
         self.encoder_codec = None
+        self.transcriber = None
         self.refs: dict[str, tuple[torch.Tensor, str]] = {}
         self.load_lock = threading.Lock()
         self.infer_lock = threading.Lock()
         self.encode_lock = threading.Lock()
+        self.transcribe_lock = threading.Lock()
 
     @property
     def loaded(self) -> bool:
@@ -126,9 +153,11 @@ class NeuTTSState:
 
         codes_path, text_path = paths
         ref_codes = torch.load(codes_path, map_location="cpu")
-        if ref_codes.numel() > self.args.max_reference_codes:
-            ref_codes = ref_codes.flatten()[: self.args.max_reference_codes]
+        original_codes = ref_codes.numel()
         ref_text = text_path.read_text(encoding="utf-8").strip()
+        if original_codes > self.args.max_reference_codes:
+            ref_codes = ref_codes.flatten()[: self.args.max_reference_codes]
+            ref_text, _ = trim_reference_text(ref_text, self.args.max_reference_codes / original_codes)
         self.refs[voice] = (ref_codes, ref_text)
         return self.refs[voice]
 
@@ -149,6 +178,27 @@ class NeuTTSState:
             self.encoder_codec = codec
             print(f"NeuCodec encoder loaded in {time.perf_counter() - started:.2f}s.", flush=True)
             return self.encoder_codec
+
+    def get_transcriber(self):
+        if self.transcriber is not None:
+            return self.transcriber
+
+        with self.load_lock:
+            if self.transcriber is not None:
+                return self.transcriber
+
+            from transformers import pipeline
+
+            print(f"Loading ASR model {self.args.asr_model} on {self.args.asr_device} ...", flush=True)
+            started = time.perf_counter()
+            device = 0 if self.args.asr_device == "cuda" and torch.cuda.is_available() else -1
+            self.transcriber = pipeline(
+                "automatic-speech-recognition",
+                model=self.args.asr_model,
+                device=device,
+            )
+            print(f"ASR model loaded in {time.perf_counter() - started:.2f}s.", flush=True)
+            return self.transcriber
 
     def sanitize_voice_name(self, name: str) -> str:
         clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", name.strip().lower()).strip("_")
@@ -181,7 +231,7 @@ class NeuTTSState:
             raise ValueError(f"Audio sample is larger than {self.args.max_reference_mb} MB.")
 
         audio_path.write_bytes(audio_bytes)
-        text_path.write_text(transcript, encoding="utf-8")
+        saved_transcript = transcript
 
         with self.encode_lock:
             from librosa import load
@@ -190,17 +240,24 @@ class NeuTTSState:
             wav, _ = load(audio_path, sr=16000, mono=True)
             max_samples = int(self.args.max_reference_seconds * 16000)
             trimmed = False
+            keep_ratio = 1.0
             if len(wav) > max_samples:
+                keep_ratio = min(keep_ratio, max_samples / len(wav))
                 wav = wav[:max_samples]
                 trimmed = True
             sf.write(audio_path, wav, 16000, format="WAV", subtype="PCM_16")
             wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)
             with torch.no_grad():
                 ref_codes = codec.encode_code(audio_or_path=wav_tensor).squeeze(0).squeeze(0)
-            if ref_codes.numel() > self.args.max_reference_codes:
+            original_codes = ref_codes.numel()
+            if original_codes > self.args.max_reference_codes:
+                keep_ratio = min(keep_ratio, self.args.max_reference_codes / original_codes)
                 ref_codes = ref_codes.flatten()[: self.args.max_reference_codes]
                 trimmed = True
             torch.save(ref_codes.cpu(), codes_path)
+            saved_transcript, transcript_trimmed = trim_reference_text(transcript, keep_ratio)
+            trimmed = trimmed or transcript_trimmed
+            text_path.write_text(saved_transcript, encoding="utf-8")
 
         self.refs.pop(name, None)
         return {
@@ -213,7 +270,41 @@ class NeuTTSState:
             "seconds": len(wav) / 16000,
             "codes": int(ref_codes.numel()),
             "trimmed": trimmed,
+            "transcript": saved_transcript,
         }
+
+    def transcribe(self, payload: dict) -> dict:
+        audio_base64 = str(payload.get("audio_base64", "")).strip()
+        if not audio_base64:
+            raise ValueError("Audio data is required.")
+        if "," in audio_base64 and audio_base64.split(",", 1)[0].startswith("data:"):
+            audio_base64 = audio_base64.split(",", 1)[1]
+
+        audio_bytes = base64.b64decode(audio_base64)
+        if len(audio_bytes) < 1024:
+            raise ValueError("Audio sample is too small.")
+        if len(audio_bytes) > self.args.max_reference_mb * 1024 * 1024:
+            raise ValueError(f"Audio sample is larger than {self.args.max_reference_mb} MB.")
+
+        TMP.mkdir(exist_ok=True)
+        audio_path = TMP / f"transcribe-{time.time_ns()}.wav"
+        audio_path.write_bytes(audio_bytes)
+        try:
+            transcriber = self.get_transcriber()
+            started = time.perf_counter()
+            with self.transcribe_lock:
+                result = transcriber(str(audio_path))
+            text = str(result.get("text", "")).strip()
+            return {
+                "text": text,
+                "elapsed": time.perf_counter() - started,
+                "model": self.args.asr_model,
+            }
+        finally:
+            try:
+                audio_path.unlink()
+            except OSError:
+                pass
 
     def speak(self, payload: dict) -> tuple[bytes, dict]:
         text = str(payload.get("text", "")).strip()
@@ -292,6 +383,7 @@ class Handler(BaseHTTPRequestHandler):
                     "backbone_device": self.state.args.backbone_device,
                     "codec": self.state.args.codec,
                     "codec_device": self.state.args.codec_device,
+                    "asr_model": self.state.args.asr_model,
                     "cuda": torch.cuda.is_available(),
                     "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
                 },
@@ -310,7 +402,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in {"/api/speak", "/api/voices"}:
+        if path not in {"/api/speak", "/api/voices", "/api/transcribe"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
 
@@ -326,6 +418,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/voices":
                 voice = self.state.create_voice(payload)
                 self._send_json(HTTPStatus.OK, {"ok": True, "voice": voice, "voices": self.state.list_voices()})
+            elif path == "/api/transcribe":
+                self._send_json(HTTPStatus.OK, {"ok": True, **self.state.transcribe(payload)})
             else:
                 audio, metadata = self.state.speak(payload)
                 headers = {"X-TTS-Metadata": json.dumps(metadata)}
@@ -351,6 +445,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-reference-mb", type=int, default=30)
     parser.add_argument("--max-reference-seconds", type=float, default=12.0)
     parser.add_argument("--max-reference-codes", type=int, default=650)
+    parser.add_argument("--asr-model", default="openai/whisper-tiny.en")
+    parser.add_argument("--asr-device", default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--preload", action="store_true", help="Load NeuTTS before accepting requests.")
     return parser.parse_args()
 
