@@ -716,32 +716,32 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
 
     function sourceText() {
       const text = $("source").value;
-      return /<\\s*(p|br|div|span|article|body|html)\\b/i.test(text) ? stripHtml(text) : text;
+      return /<\s*(p|br|div|span|article|body|html)\b/i.test(text) ? stripHtml(text) : text;
     }
 
     function sentenceUnits(text) {
-      const clean = text.replace(/\\r/g, "").replace(/[ \\t]+/g, " ").trim();
+      const clean = text.replace(/\r/g, "").replace(/[ \t]+/g, " ").trim();
       if (!clean) return [];
       if ("Segmenter" in Intl) {
         const segmenter = new Intl.Segmenter("en", { granularity: "sentence" });
         return Array.from(segmenter.segment(clean), (part) => part.segment.trim()).filter(Boolean);
       }
-      return clean.match(/[^.!?]+[.!?]+["')\\]]*|[^.!?]+$/g)?.map((x) => x.trim()).filter(Boolean) || [clean];
+      return clean.match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g)?.map((x) => x.trim()).filter(Boolean) || [clean];
     }
 
     function paragraphUnits(text) {
-      return text.replace(/\\r/g, "").split(/\\n{2,}/).map((x) => x.replace(/\\s+/g, " ").trim()).filter(Boolean);
+      return text.replace(/\r/g, "").split(/\n{2,}/).map((x) => x.replace(/\s+/g, " ").trim()).filter(Boolean);
     }
 
     function lineUnits(text) {
-      return text.replace(/\\r/g, "").split(/\\n+/).map((x) => x.replace(/\\s+/g, " ").trim()).filter(Boolean);
+      return text.replace(/\r/g, "").split(/\n+/).map((x) => x.replace(/\s+/g, " ").trim()).filter(Boolean);
     }
 
     function splitLongUnit(unit, maxChars) {
       if (unit.length <= maxChars) return [unit];
       const chunks = [];
       let current = "";
-      for (const word of unit.split(/\\s+/)) {
+      for (const word of unit.split(/\s+/)) {
         const candidate = current ? `${current} ${word}` : word;
         if (candidate.length <= maxChars || !current) {
           current = candidate;
