@@ -24,6 +24,7 @@ HF_HOME = ROOT / ".hf-cache"
 os.environ.setdefault("HF_HOME", str(HF_HOME))
 
 ROYALROAD_BASE = "https://www.royalroad.com"
+WUXIAWORLD_BASE = "https://www.wuxiaworld.com"
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 LocalTTSReader/1.0",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -482,6 +483,237 @@ def parse_royalroad_chapter(page_html: str, url: str) -> dict:
     }
 
 
+def get_value(value, default=""):
+    if isinstance(value, dict):
+        if "value" in value:
+            return value.get("value") or default
+        if "units" in value:
+            return value.get("units") or default
+    return value if value not in (None, "") else default
+
+
+def get_int(value, default: int = 0) -> int:
+    value = get_value(value, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_wuxiaworld_state(page_html: str) -> dict:
+    marker = "window.__REACT_QUERY_STATE__ = "
+    start = page_html.find(marker)
+    if start < 0:
+        raise ValueError("Could not find WuxiaWorld page data.")
+    start += len(marker)
+    end = page_html.find("window.__APP_CONTEXT__", start)
+    if end < 0:
+        script_end = page_html.find("</script>", start)
+        end = script_end if script_end >= 0 else len(page_html)
+    blob = page_html[start:end].strip()
+    if blob.endswith(";"):
+        blob = blob[:-1].strip()
+    try:
+        return json.loads(blob)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Could not parse WuxiaWorld page data.") from exc
+
+
+def find_wuxiaworld_query(page_html: str, *prefix) -> dict:
+    state = parse_wuxiaworld_state(page_html)
+    for query in state.get("queries", []):
+        key = query.get("queryKey") or []
+        if len(key) >= len(prefix) and all(key[index] == value for index, value in enumerate(prefix)):
+            return query.get("state", {}).get("data", {}) or {}
+    raise ValueError(f"Could not find WuxiaWorld data for {prefix[0] if prefix else 'page'}.")
+
+
+def wuxiaworld_novel_from_item(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return {}
+    if item.get("oneofKind") == "novel" and isinstance(item.get("novel"), dict):
+        return item["novel"]
+    series_item = (((item.get("series") or {}).get("item") or {}) if isinstance(item.get("series"), dict) else {})
+    if isinstance(series_item, dict) and series_item.get("oneofKind") == "novel":
+        return series_item.get("novel") or {}
+    if isinstance(item.get("item"), dict):
+        return wuxiaworld_novel_from_item(item["item"])
+    if item.get("slug") and item.get("name"):
+        return item
+    return {}
+
+
+def wuxiaworld_free_chapter_count(novel: dict, chapter_count: int) -> int:
+    counts = []
+    series = novel.get("series") if isinstance(novel.get("series"), dict) else {}
+    pricing_models = list(series.get("activePricingModels") or [])
+    if isinstance(series.get("pricingModel"), dict):
+        pricing_models.append(series["pricingModel"])
+    karma = novel.get("karmaInfo") if isinstance(novel.get("karmaInfo"), dict) else {}
+    if get_int(karma.get("maxFreeChapter")):
+        counts.append(get_int(karma.get("maxFreeChapter")))
+    for model in pricing_models:
+        pricing = model.get("pricing") if isinstance(model, dict) else {}
+        if not isinstance(pricing, dict):
+            continue
+        oneof = pricing.get("oneofKind")
+        pricing_data = pricing.get(oneof) if oneof else None
+        if isinstance(pricing_data, dict):
+            free_chapters = get_int(pricing_data.get("freeChapters"))
+            if free_chapters:
+                counts.append(free_chapters)
+        if oneof == "free":
+            counts.append(chapter_count)
+    return max([0, *counts])
+
+
+def wuxiaworld_card(novel: dict) -> dict:
+    title = str(novel.get("name") or "WuxiaWorld novel")
+    slug = str(novel.get("slug") or "").strip("/")
+    chapter_count = get_int((novel.get("chapterInfo") or {}).get("chapterCount")) if isinstance(novel.get("chapterInfo"), dict) else 0
+    author = str(get_value(novel.get("authorName")) or "")
+    translator = str(get_value(novel.get("translatorName")) or "")
+    tags = [str(tag) for tag in (novel.get("genres") or novel.get("tags") or []) if tag]
+    stats = []
+    if chapter_count:
+        stats.append(f"{chapter_count} chapters")
+    if author:
+        stats.append(f"Author: {author}")
+    if translator:
+        stats.append(f"Translator: {translator}")
+    return {
+        "source": "wuxiaworld",
+        "title": title,
+        "url": absolutize_url(f"/novel/{slug}", WUXIAWORLD_BASE),
+        "cover": str(get_value(novel.get("coverUrl")) or ""),
+        "summary": clean_html_text(str(get_value(novel.get("synopsis")) or ""))[:900],
+        "tags": tags[:8],
+        "stats": stats[:6],
+    }
+
+
+def parse_wuxiaworld_cards(page_html: str, query: str = "", limit: int = 30) -> list[dict]:
+    state = parse_wuxiaworld_state(page_html)
+    items = []
+    seen = set()
+    query = query.casefold().strip()
+    for entry in state.get("queries", []):
+        data = entry.get("state", {}).get("data", {}) or {}
+        raw_items = list(data.get("items", []) or [])
+        for page in data.get("pages", []) or []:
+            if isinstance(page, dict):
+                raw_items.extend(page.get("items", []) or [])
+        for raw_item in raw_items:
+            novel = wuxiaworld_novel_from_item(raw_item)
+            if not novel:
+                continue
+            title = str(novel.get("name") or "")
+            slug = str(novel.get("slug") or "")
+            if not title or not slug or (query and query not in title.casefold()):
+                continue
+            url = absolutize_url(f"/novel/{slug}", WUXIAWORLD_BASE)
+            if url in seen:
+                continue
+            seen.add(url)
+            items.append(wuxiaworld_card(novel))
+            if len(items) >= limit:
+                return items
+    return items
+
+
+def parse_wuxiaworld_detail(page_html: str, url: str) -> dict:
+    path = urlparse(url).path.rstrip("/")
+    slug = path.split("/")[-1]
+    data = find_wuxiaworld_query(page_html, "novel", slug)
+    novel = wuxiaworld_novel_from_item(data.get("item") or data)
+    if not novel:
+        raise ValueError("Could not find WuxiaWorld novel details.")
+
+    chapter_info = novel.get("chapterInfo") if isinstance(novel.get("chapterInfo"), dict) else {}
+    chapter_count = get_int(chapter_info.get("chapterCount"))
+    first = chapter_info.get("firstChapter") if isinstance(chapter_info.get("firstChapter"), dict) else {}
+    latest = chapter_info.get("latestChapter") if isinstance(chapter_info.get("latestChapter"), dict) else {}
+    first_offset = get_int(first.get("offset") or first.get("number"), 1)
+    latest_offset = get_int(latest.get("offset") or latest.get("number"), chapter_count)
+    public_count = wuxiaworld_free_chapter_count(novel, chapter_count)
+    public_count = min(chapter_count or public_count, public_count or chapter_count or latest_offset)
+
+    chapters = []
+    first_slug = str(first.get("slug") or "")
+    slug_prefix = ""
+    match = re.match(r"^(.*?)(\d+)$", first_slug)
+    if match:
+        slug_prefix = match.group(1)
+    if slug_prefix and public_count:
+        for number in range(first_offset, public_count + 1):
+            chapter_slug = f"{slug_prefix}{number}"
+            if number == first_offset and first.get("name"):
+                title = str(first["name"])
+            elif number == latest_offset and latest.get("name"):
+                title = str(latest["name"])
+            else:
+                title = f"Chapter {number}"
+            chapters.append(
+                {
+                    "title": title,
+                    "url": absolutize_url(f"/novel/{slug}/{chapter_slug}", WUXIAWORLD_BASE),
+                    "date": "",
+                }
+            )
+    else:
+        for chapter in (first, latest):
+            chapter_slug = chapter.get("slug")
+            if not chapter_slug:
+                continue
+            chapters.append(
+                {
+                    "title": str(chapter.get("name") or f"Chapter {len(chapters) + 1}"),
+                    "url": absolutize_url(f"/novel/{slug}/{chapter_slug}", WUXIAWORLD_BASE),
+                    "date": "",
+                }
+            )
+
+    return {
+        "ok": True,
+        "source": "wuxiaworld",
+        "title": str(novel.get("name") or "WuxiaWorld novel"),
+        "author": str(get_value(novel.get("authorName")) or ""),
+        "url": url,
+        "cover": str(get_value(novel.get("coverUrl")) or ""),
+        "summary": clean_html_text(str(get_value(novel.get("synopsis")) or "")),
+        "tags": [str(tag) for tag in (novel.get("genres") or novel.get("tags") or []) if tag][:16],
+        "chapters": chapters,
+    }
+
+
+def parse_wuxiaworld_chapter(page_html: str, url: str) -> dict:
+    path_parts = [part for part in urlparse(url).path.split("/") if part]
+    if len(path_parts) < 3:
+        raise ValueError("Unsupported WuxiaWorld chapter URL.")
+    novel_slug, chapter_slug = path_parts[1], path_parts[2]
+    data = find_wuxiaworld_query(page_html, "chapter", novel_slug, chapter_slug)
+    chapter = data.get("item") if isinstance(data.get("item"), dict) else data
+    pricing = chapter.get("pricingInfo") if isinstance(chapter.get("pricingInfo"), dict) else {}
+    if pricing and pricing.get("isFree") is False:
+        raise ValueError("This WuxiaWorld chapter is not marked free in the public page data.")
+    content = str(get_value(chapter.get("content")) or "")
+    if not content:
+        raise ValueError("Could not find public WuxiaWorld chapter content.")
+    text = clean_html_text(content)
+    if len(text) < 200:
+        raise ValueError("Extracted WuxiaWorld chapter text is too short.")
+    novel_info = chapter.get("novelInfo") if isinstance(chapter.get("novelInfo"), dict) else {}
+    return {
+        "ok": True,
+        "source": "wuxiaworld",
+        "title": str(chapter.get("name") or "WuxiaWorld chapter"),
+        "novel": str(novel_info.get("name") or ""),
+        "url": url,
+        "text": text,
+        "chars": len(text),
+    }
+
+
 class KokoroState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -580,6 +812,10 @@ class KokoroState:
             return self.imported_document
 
     def source_feed(self, source: str, kind: str) -> dict:
+        if source == "wuxiaworld":
+            feed_path = "/" if (kind or "trending") == "trending" else "/novels"
+            page = fetch_public_html(feed_path, WUXIAWORLD_BASE)
+            return {"ok": True, "source": "wuxiaworld", "kind": kind or "trending", "items": parse_wuxiaworld_cards(page)}
         if source != "royalroad":
             raise ValueError(f"Unsupported source: {source}")
         feed_path = {
@@ -592,15 +828,25 @@ class KokoroState:
         return {"ok": True, "source": "royalroad", "kind": kind or "trending", "items": parse_royalroad_cards(page)}
 
     def source_search(self, source: str, query: str) -> dict:
-        if source != "royalroad":
-            raise ValueError(f"Unsupported source: {source}")
         query = query.strip()
         if not query:
             raise ValueError("Search query is required.")
+        if source == "wuxiaworld":
+            page = fetch_public_html("/novels", WUXIAWORLD_BASE)
+            return {"ok": True, "source": "wuxiaworld", "query": query, "items": parse_wuxiaworld_cards(page, query)}
+        if source != "royalroad":
+            raise ValueError(f"Unsupported source: {source}")
         page = fetch_public_html(f"/fictions/search?title={quote_plus(query)}")
         return {"ok": True, "source": "royalroad", "query": query, "items": parse_royalroad_cards(page)}
 
     def source_novel(self, source: str, url: str) -> dict:
+        if source == "wuxiaworld":
+            full_url = absolutize_url(url, WUXIAWORLD_BASE)
+            path = urlparse(full_url).path
+            if not re.match(r"^/novel/[^/]+/?$", path):
+                raise ValueError("Unsupported WuxiaWorld novel URL.")
+            page = fetch_public_html(full_url, WUXIAWORLD_BASE)
+            return parse_wuxiaworld_detail(page, full_url)
         if source != "royalroad":
             raise ValueError(f"Unsupported source: {source}")
         full_url = absolutize_url(url)
@@ -611,6 +857,13 @@ class KokoroState:
         return parse_royalroad_detail(page, full_url)
 
     def source_chapter(self, source: str, url: str) -> dict:
+        if source == "wuxiaworld":
+            full_url = absolutize_url(url, WUXIAWORLD_BASE)
+            path = urlparse(full_url).path
+            if not re.match(r"^/novel/[^/]+/[^/]+/?$", path):
+                raise ValueError("Unsupported WuxiaWorld chapter URL.")
+            page = fetch_public_html(full_url, WUXIAWORLD_BASE)
+            return parse_wuxiaworld_chapter(page, full_url)
         if source != "royalroad":
             raise ValueError(f"Unsupported source: {source}")
         full_url = absolutize_url(url)
@@ -685,7 +938,8 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "sources": [
-                            {"id": "royalroad", "label": "RoyalRoad", "supports": ["feed", "search", "novel", "chapter"]}
+                            {"id": "royalroad", "label": "RoyalRoad", "supports": ["feed", "search", "novel", "chapter"]},
+                            {"id": "wuxiaworld", "label": "WuxiaWorld", "supports": ["feed", "search", "novel", "chapter"]},
                         ],
                     },
                 )
