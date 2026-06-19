@@ -335,6 +335,8 @@ class KokoroState:
         self.args = args
         self.pipelines: dict[str, KPipeline] = {}
         self.lock = threading.Lock()
+        self.import_lock = threading.Lock()
+        self.imported_document: dict | None = None
 
     @property
     def loaded(self) -> bool:
@@ -396,6 +398,35 @@ class KokoroState:
         }
         return audio.getvalue(), metadata
 
+    def set_imported_document(self, payload: dict) -> dict:
+        title = str(payload.get("title", "")).strip()[:240]
+        text = str(payload.get("text", "")).strip()
+        url = str(payload.get("url", "")).strip()[:1000]
+        source = str(payload.get("source", "browser")).strip()[:80]
+        if not text:
+            raise ValueError("Imported text is empty.")
+        if len(text) > 2_000_000:
+            raise ValueError("Imported text is too large.")
+
+        document = {
+            "ok": True,
+            "title": title or "Imported chapter",
+            "text": text,
+            "url": url,
+            "source": source,
+            "chars": len(text),
+            "imported_at": time.time(),
+        }
+        with self.import_lock:
+            self.imported_document = document
+        return {key: value for key, value in document.items() if key != "text"}
+
+    def get_imported_document(self) -> dict:
+        with self.import_lock:
+            if not self.imported_document:
+                return {"ok": False, "error": "No browser import is available yet."}
+            return self.imported_document
+
 
 class Handler(BaseHTTPRequestHandler):
     state: KokoroState
@@ -448,11 +479,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_bytes(HTTPStatus.OK, make_test_tone(), "audio/wav")
             return
 
+        if path == "/api/imported":
+            self._send_json(HTTPStatus.OK, self.state.get_imported_document())
+            return
+
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path != "/api/speak":
+        if path not in {"/api/speak", "/api/imported"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
 
@@ -464,6 +499,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(raw.decode("utf-8") or "{}")
             else:
                 payload = {key: values[0] for key, values in parse_qs(raw.decode("utf-8")).items()}
+
+            if path == "/api/imported":
+                self._send_json(HTTPStatus.OK, self.state.set_imported_document(payload))
+                return
 
             audio, metadata = self.state.speak(payload)
             headers = {"X-TTS-Metadata": json.dumps(metadata)}

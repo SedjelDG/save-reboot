@@ -87,6 +87,7 @@ Use the reader's `Engine` select to switch between Kokoro and NeuTTS Nano.
 - Chunk controls for smart, sentence, paragraph, or line mode with min/max character bounds.
 - Smart chunking splits long sentences at punctuation and uses smaller NeuTTS chunks to reduce skipped text. NeuTTS chunk sizes are capped more aggressively than Kokoro because Nano is more sensitive to long prompts.
 - Optional punctuation pause padding for synthesis without changing the highlighted reader text.
+- Browser-assisted web import for Novelfull-style chapter pages. Novelfull blocks direct server-side scraping with Cloudflare, so the app accepts cleaned text sent from a page opened normally in your browser instead of bypassing the challenge.
 - Queue caching, current-chunk highlighting, autoscroll, and save-current-audio support.
 
 ## Notes

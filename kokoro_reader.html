@@ -413,6 +413,20 @@
       color: #63716a;
     }
 
+    .bookmarklet-link {
+      display: block;
+      overflow: hidden;
+      padding: 9px 10px;
+      border: 1px solid #b9c5bd;
+      border-radius: 7px;
+      background: #fffef9;
+      color: #245e4f;
+      font-size: 12px;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .hidden {
       display: none;
     }
@@ -496,6 +510,12 @@
         <h2>Servers</h2>
         <div id="engineStatus" class="status-grid"></div>
         <button id="refreshServers" class="ghost" type="button">Refresh Status</button>
+
+        <h2>Web Import</h2>
+        <button id="loadBrowserImport" type="button">Load Import</button>
+        <button id="copyImportBookmarklet" class="ghost" type="button">Copy Bookmarklet</button>
+        <a id="importBookmarkletLink" class="bookmarklet-link" href="#">Novelfull Import</a>
+        <div id="importStatus" class="small-note">Use the bookmarklet on an open chapter page, then load it here.</div>
 
         <h2>Voice</h2>
         <label>
@@ -695,6 +715,66 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
 
     function log(message) {
       $("log").textContent = message;
+    }
+
+    function importBookmarkletCode() {
+      const script = `(() => {
+        const remove = "script,style,noscript,iframe,svg,canvas,form,button,select,ins,.ads,.ad,.advertisement,[id*=ads],[class*=ads],.chapter-nav,.nav-chapter,.breadcrumb,.footer,.comments";
+        const selectors = ["#chapter-content", ".chapter-content", ".chapter-c", "#chr-content", ".chr-c", ".reading-content", "article", "main"];
+        const cleanText = (node) => {
+          const copy = node.cloneNode(true);
+          copy.querySelectorAll(remove).forEach((item) => item.remove());
+          return (copy.innerText || copy.textContent || "").replace(/\\u00a0/g, " ").replace(/[ \\t]+/g, " ").replace(/\\n{3,}/g, "\\n\\n").trim();
+        };
+        const titleNode = document.querySelector("h1, .chapter-title, .truyen-title, .chapter h2, h2");
+        const root = selectors.map((selector) => document.querySelector(selector)).find((node) => node && cleanText(node).length > 200) || document.body;
+        const title = ((titleNode && (titleNode.innerText || titleNode.textContent)) || document.title || "Imported chapter").trim();
+        const text = cleanText(root);
+        if (!text || text.length < 200) {
+          alert("Could not find enough chapter text on this page.");
+          return;
+        }
+        fetch("http://127.0.0.1:7860/api/imported", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: location.hostname, url: location.href, title, text })
+        }).then((response) => response.json()).then((data) => {
+          if (!data.ok) throw new Error(data.error || "Import failed.");
+          alert("Imported " + data.chars + " characters. Return to Local TTS Reader and click Load Import.");
+        }).catch((error) => alert(String(error.message || error)));
+      })();`;
+      return `javascript:${encodeURIComponent(script)}`;
+    }
+
+    function setupBrowserImport() {
+      const code = importBookmarkletCode();
+      $("importBookmarkletLink").href = code;
+      $("importBookmarkletLink").title = "Drag this link to your bookmarks bar or copy it with the button.";
+    }
+
+    async function copyImportBookmarklet() {
+      const code = importBookmarkletCode();
+      await navigator.clipboard.writeText(code);
+      $("importStatus").textContent = "Bookmarklet copied. Add it as a browser bookmark URL.";
+      log("Bookmarklet copied. Open a Novelfull chapter, run the bookmarklet, then return here and click Load Import.");
+    }
+
+    async function loadBrowserImport() {
+      setStatus("Loading import");
+      const response = await fetch("/api/imported");
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || "No browser import is available.");
+
+      $("source").value = `${data.title}\n\n${data.text}`;
+      state.cache.clear();
+      state.pendingCurrent = 0;
+      buildChunks();
+      $("readerShell").classList.remove("source-mode");
+      $("readTab").classList.add("active");
+      $("sourceTab").classList.remove("active");
+      $("importStatus").textContent = `Loaded ${data.title} | ${data.chars.toLocaleString()} chars`;
+      log(`Imported from ${data.source || "browser"}\n${data.url || ""}`);
+      setStatus("Import loaded");
     }
 
     function setVoiceSample(blob, label) {
@@ -1571,6 +1651,23 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       $("bookmark").addEventListener("click", addBookmark);
       $("exportSession").addEventListener("click", exportSession);
       $("importSession").addEventListener("click", () => $("sessionInput").click());
+      $("loadBrowserImport").addEventListener("click", async () => {
+        try {
+          await loadBrowserImport();
+        } catch (error) {
+          setStatus("Import error");
+          $("importStatus").textContent = String(error.message || error);
+          log(String(error.message || error));
+        }
+      });
+      $("copyImportBookmarklet").addEventListener("click", async () => {
+        try {
+          await copyImportBookmarklet();
+        } catch (error) {
+          $("importStatus").textContent = "Clipboard failed. Drag the Novelfull Import link to bookmarks instead.";
+          log(String(error.message || error));
+        }
+      });
       $("tone").addEventListener("click", testTone);
       $("uploadVoiceAudio").addEventListener("click", () => $("voiceAudioInput").click());
       $("recordMic").addEventListener("click", async () => {
@@ -1652,7 +1749,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       });
       $("addBookmark").addEventListener("click", addBookmark);
       $("clearBookmarks").addEventListener("click", clearActiveBookmarks);
-      ["voice", "language", "speed", "volume", "chunkMode", "minChars", "maxChars", "autoScroll", "prefetch", "cacheAudio"].forEach((id) => {
+      ["voice", "language", "speed", "volume", "chunkMode", "minChars", "maxChars", "pauseMode", "autoScroll", "prefetch", "cacheAudio"].forEach((id) => {
         $(id).addEventListener("change", savePrefs);
       });
       $("source").addEventListener("input", () => {
@@ -1673,6 +1770,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
     fillSelect("engine", engines, "kokoro");
     fillSelect("voice", voices, "af_heart");
     fillSelect("language", languages, "a");
+    setupBrowserImport();
     renderServerStatus();
     loadBookmarks();
     loadPrefs();
@@ -1681,6 +1779,9 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
     refreshNeuttsVoices();
     refreshServerStatus();
     refreshHealth();
+    if (new URLSearchParams(location.search).get("imported") === "1") {
+      loadBrowserImport().catch(() => {});
+    }
   </script>
 </body>
 </html>
