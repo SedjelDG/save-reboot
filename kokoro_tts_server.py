@@ -1,14 +1,17 @@
 import argparse
+import html
 import io
 import json
 import os
+import re
 import sys
 import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
+from urllib.request import Request, urlopen
 
 import numpy as np
 import soundfile as sf
@@ -19,6 +22,12 @@ from kokoro import KPipeline
 ROOT = Path(__file__).resolve().parent
 HF_HOME = ROOT / ".hf-cache"
 os.environ.setdefault("HF_HOME", str(HF_HOME))
+
+ROYALROAD_BASE = "https://www.royalroad.com"
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 LocalTTSReader/1.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 VOICES = [
     "af_heart",
@@ -330,6 +339,149 @@ def make_test_tone(sample_rate=24000, seconds=1.0, frequency=440.0) -> bytes:
     return audio.getvalue()
 
 
+def clean_html_text(value: str) -> str:
+    value = re.sub(r"(?is)<(script|style|noscript|iframe|svg|canvas).*?</\1>", " ", value)
+    value = re.sub(r"(?i)<br\s*/?>", "\n", value)
+    value = re.sub(r"(?i)</(p|div|li|h1|h2|h3|tr)>", "\n", value)
+    value = re.sub(r"(?s)<[^>]+>", " ", value)
+    value = html.unescape(value).replace("\xa0", " ")
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n\s+", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def absolutize_url(url: str, base: str = ROYALROAD_BASE) -> str:
+    return urljoin(base, html.unescape(url))
+
+
+def fetch_public_html(url_or_path: str, base: str = ROYALROAD_BASE) -> str:
+    url = absolutize_url(url_or_path, base)
+    parsed = urlparse(url)
+    allowed = urlparse(base).netloc
+    if parsed.scheme not in {"https", "http"} or parsed.netloc != allowed:
+        raise ValueError(f"Unsupported source URL: {url}")
+    request = Request(url, headers=HTTP_HEADERS)
+    with urlopen(request, timeout=25) as response:
+        content_type = response.headers.get("Content-Type", "")
+        if "text/html" not in content_type and "charset" not in content_type:
+            raise ValueError(f"Unexpected source response type: {content_type}")
+        return response.read().decode("utf-8", errors="replace")
+
+
+def parse_royalroad_cards(page_html: str, limit: int = 30) -> list[dict]:
+    blocks = re.split(r'<div class="(?:row )?fiction-list-item(?: row)?">', page_html)
+    items = []
+    seen = set()
+    for block in blocks[1:]:
+        title_match = re.search(r'<h2 class="fiction-title">\s*<a href="([^"]+)"[^>]*>(.*?)</a>', block, re.S)
+        if not title_match:
+            continue
+        url = absolutize_url(title_match.group(1))
+        if url in seen:
+            continue
+        seen.add(url)
+        cover_match = re.search(r'<img[^>]+src="([^"]+)"', block, re.S)
+        description_match = re.search(r'<div id="description-[^"]+"[^>]*>(.*?)</div>\s*</div>', block, re.S)
+        tags = [clean_html_text(match) for match in re.findall(r'class="[^"]*fiction-tag[^"]*"[^>]*>(.*?)</a>', block, re.S)]
+        stats = [clean_html_text(match) for match in re.findall(r'<span>([^<]*(?:Followers|Pages|Views|Chapters)[^<]*)</span>', block, re.I)]
+        items.append(
+            {
+                "source": "royalroad",
+                "title": clean_html_text(title_match.group(2)),
+                "url": url,
+                "cover": absolutize_url(cover_match.group(1)) if cover_match else "",
+                "summary": clean_html_text(description_match.group(1))[:900] if description_match else "",
+                "tags": tags[:8],
+                "stats": stats[:6],
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def parse_royalroad_detail(page_html: str, url: str) -> dict:
+    book = {}
+    script_match = re.search(r'<script type="application/ld\+json">(.*?)</script>', page_html, re.S)
+    if script_match:
+        try:
+            book = json.loads(html.unescape(script_match.group(1)))
+        except json.JSONDecodeError:
+            book = {}
+
+    title = clean_html_text(str(book.get("name") or ""))
+    author = ""
+    if isinstance(book.get("author"), dict):
+        author = str(book["author"].get("name") or "")
+    description = clean_html_text(str(book.get("description") or ""))
+    cover = str(book.get("image") or book.get("thumbnailUrl") or "")
+
+    if not title:
+        match = re.search(r'<meta property="og:title" content="([^"]+)"', page_html)
+        title = clean_html_text(match.group(1)) if match else "RoyalRoad fiction"
+    if not description:
+        desc_match = re.search(r'<div class="description">\s*(.*?)\s*<label', page_html, re.S)
+        description = clean_html_text(desc_match.group(1)) if desc_match else ""
+
+    tags = [clean_html_text(match) for match in re.findall(r'class="[^"]*fiction-tag[^"]*"[^>]*>(.*?)</a>', page_html, re.S)]
+    chapters = []
+    for match in re.finditer(r'<tr(?P<attrs>[^>]*)>(?P<body>.*?)</tr>', page_html, re.S):
+        attrs = match.group("attrs")
+        if "chapter-row" not in attrs:
+            continue
+        url_match = re.search(r'data-url="([^"]+)"', attrs)
+        if not url_match:
+            continue
+        chapter_url = absolutize_url(url_match.group(1))
+        cell = match.group("body")
+        title_match = re.search(r'<td>\s*<a[^>]+>(.*?)</a>', cell, re.S)
+        date_match = re.search(r'<time[^>]+datetime="([^"]+)"', cell, re.S)
+        chapters.append(
+            {
+                "title": clean_html_text(title_match.group(1)) if title_match else f"Chapter {len(chapters) + 1}",
+                "url": chapter_url,
+                "date": html.unescape(date_match.group(1)) if date_match else "",
+            }
+        )
+
+    return {
+        "ok": True,
+        "source": "royalroad",
+        "title": title,
+        "author": author,
+        "url": url,
+        "cover": cover,
+        "summary": description,
+        "tags": tags[:16],
+        "chapters": chapters,
+    }
+
+
+def parse_royalroad_chapter(page_html: str, url: str) -> dict:
+    title_match = re.search(r'<h1[^>]*class="[^"]*font-white[^"]*"[^>]*>(.*?)</h1>', page_html, re.S)
+    fiction_match = re.search(r'<h2[^>]*class="[^"]*font-white[^"]*"[^>]*>(.*?)</h2>', page_html, re.S)
+    body_match = re.search(
+        r'<div class="chapter-inner chapter-content">\s*(.*?)(?:<div class="portlet light d|<div class="portlet solid author-note|<div class="portlet-footer)',
+        page_html,
+        re.S,
+    )
+    if not body_match:
+        raise ValueError("Could not find chapter content on this RoyalRoad page.")
+    text = clean_html_text(body_match.group(1))
+    if len(text) < 200:
+        raise ValueError("Extracted chapter text is too short.")
+    return {
+        "ok": True,
+        "source": "royalroad",
+        "title": clean_html_text(title_match.group(1)) if title_match else "RoyalRoad chapter",
+        "novel": clean_html_text(fiction_match.group(1)) if fiction_match else "",
+        "url": url,
+        "text": text,
+        "chars": len(text),
+    }
+
+
 class KokoroState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -427,6 +579,47 @@ class KokoroState:
                 return {"ok": False, "error": "No browser import is available yet."}
             return self.imported_document
 
+    def source_feed(self, source: str, kind: str) -> dict:
+        if source != "royalroad":
+            raise ValueError(f"Unsupported source: {source}")
+        feed_path = {
+            "trending": "/fictions/trending",
+            "latest": "/fictions/latest-updates",
+            "best": "/fictions/best-rated",
+            "complete": "/fictions/complete",
+        }.get(kind or "trending", "/fictions/trending")
+        page = fetch_public_html(feed_path)
+        return {"ok": True, "source": "royalroad", "kind": kind or "trending", "items": parse_royalroad_cards(page)}
+
+    def source_search(self, source: str, query: str) -> dict:
+        if source != "royalroad":
+            raise ValueError(f"Unsupported source: {source}")
+        query = query.strip()
+        if not query:
+            raise ValueError("Search query is required.")
+        page = fetch_public_html(f"/fictions/search?title={quote_plus(query)}")
+        return {"ok": True, "source": "royalroad", "query": query, "items": parse_royalroad_cards(page)}
+
+    def source_novel(self, source: str, url: str) -> dict:
+        if source != "royalroad":
+            raise ValueError(f"Unsupported source: {source}")
+        full_url = absolutize_url(url)
+        path = urlparse(full_url).path
+        if not re.match(r"^/fiction/\d+/", path):
+            raise ValueError("Unsupported RoyalRoad novel URL.")
+        page = fetch_public_html(full_url)
+        return parse_royalroad_detail(page, full_url)
+
+    def source_chapter(self, source: str, url: str) -> dict:
+        if source != "royalroad":
+            raise ValueError(f"Unsupported source: {source}")
+        full_url = absolutize_url(url)
+        path = urlparse(full_url).path
+        if not re.match(r"^/fiction/\d+/.+/chapter/\d+/", path):
+            raise ValueError("Unsupported RoyalRoad chapter URL.")
+        page = fetch_public_html(full_url)
+        return parse_royalroad_chapter(page, full_url)
+
 
 class Handler(BaseHTTPRequestHandler):
     state: KokoroState
@@ -453,7 +646,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
         if path == "/":
             html_path = ROOT / "kokoro_reader.html"
             html = html_path.read_text(encoding="utf-8") if html_path.exists() else INDEX_HTML
@@ -481,6 +676,46 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/imported":
             self._send_json(HTTPStatus.OK, self.state.get_imported_document())
+            return
+
+        try:
+            if path == "/api/sources":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "sources": [
+                            {"id": "royalroad", "label": "RoyalRoad", "supports": ["feed", "search", "novel", "chapter"]}
+                        ],
+                    },
+                )
+                return
+            if path == "/api/source/feed":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.state.source_feed(query.get("source", ["royalroad"])[0], query.get("kind", ["trending"])[0]),
+                )
+                return
+            if path == "/api/source/search":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.state.source_search(query.get("source", ["royalroad"])[0], query.get("q", [""])[0]),
+                )
+                return
+            if path == "/api/source/novel":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.state.source_novel(query.get("source", ["royalroad"])[0], query.get("url", [""])[0]),
+                )
+                return
+            if path == "/api/source/chapter":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.state.source_chapter(query.get("source", ["royalroad"])[0], query.get("url", [""])[0]),
+                )
+                return
+        except Exception as error:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(error)})
             return
 
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})

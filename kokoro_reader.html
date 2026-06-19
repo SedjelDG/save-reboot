@@ -427,6 +427,67 @@
       white-space: nowrap;
     }
 
+    .source-list {
+      display: grid;
+      gap: 8px;
+      max-height: 300px;
+      overflow: auto;
+    }
+
+    .source-card {
+      display: grid;
+      gap: 7px;
+      padding: 9px;
+      border: 1px solid #d3d9d5;
+      border-radius: 8px;
+      background: #fffef9;
+    }
+
+    .source-card .title {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: #202522;
+      text-align: left;
+      font-weight: 760;
+      line-height: 1.25;
+    }
+
+    .source-card .meta,
+    .source-card .summary {
+      font-size: 12px;
+      line-height: 1.35;
+      color: #63716a;
+    }
+
+    .source-card .summary {
+      display: -webkit-box;
+      overflow: hidden;
+      -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical;
+    }
+
+    .chapter-actions {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .chapter-actions .chapter-title {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 12px;
+      font-weight: 640;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chapter-actions button {
+      padding: 7px 9px;
+      font-size: 12px;
+    }
+
     .hidden {
       display: none;
     }
@@ -516,6 +577,34 @@
         <button id="copyImportBookmarklet" class="ghost" type="button">Copy Bookmarklet</button>
         <a id="importBookmarkletLink" class="bookmarklet-link" href="#">Novelfull Import</a>
         <div id="importStatus" class="small-note">Use the bookmarklet on an open chapter page, then load it here.</div>
+
+        <h2>Sources</h2>
+        <label>
+          Source
+          <select id="sourceProvider">
+            <option value="royalroad">RoyalRoad</option>
+          </select>
+        </label>
+        <label>
+          Search
+          <input id="sourceSearch" type="search" placeholder="Title search" />
+        </label>
+        <div class="compact-actions">
+          <button id="sourceFeed" type="button">Feed</button>
+          <button id="sourceSearchBtn" class="ghost" type="button">Search</button>
+        </div>
+        <label>
+          Feed
+          <select id="sourceFeedKind">
+            <option value="trending">Trending</option>
+            <option value="latest">Latest</option>
+            <option value="best">Best Rated</option>
+            <option value="complete">Complete</option>
+          </select>
+        </label>
+        <div id="sourceStatus" class="small-note">RoyalRoad public chapters can load directly.</div>
+        <div id="sourceResults" class="source-list"></div>
+        <div id="sourceNovel" class="source-list"></div>
 
         <h2>Voice</h2>
         <label>
@@ -777,6 +866,91 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       setStatus("Import loaded");
     }
 
+    function sourceApi(path, params = {}) {
+      const search = new URLSearchParams({ source: $("sourceProvider").value || "royalroad", ...params });
+      return `${path}?${search.toString()}`;
+    }
+
+    async function fetchSourceJson(path, params = {}) {
+      const response = await fetch(sourceApi(path, params));
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || "Source request failed.");
+      return data;
+    }
+
+    function renderSourceResults(items) {
+      $("sourceNovel").innerHTML = "";
+      $("sourceResults").innerHTML = items.length ? items.map((item) => `
+        <div class="source-card">
+          <button class="title open-source-novel" type="button" data-url="${escapeHtml(item.url)}">${escapeHtml(item.title)}</button>
+          <div class="meta">${escapeHtml([...(item.tags || []), ...(item.stats || [])].slice(0, 6).join(" | "))}</div>
+          ${item.summary ? `<div class="summary">${escapeHtml(item.summary)}</div>` : ""}
+        </div>
+      `).join("") : `<div class="server-card">No results.</div>`;
+    }
+
+    async function loadSourceFeed() {
+      setStatus("Loading source");
+      $("sourceStatus").textContent = "Loading feed...";
+      const data = await fetchSourceJson("/api/source/feed", { kind: $("sourceFeedKind").value });
+      renderSourceResults(data.items || []);
+      $("sourceStatus").textContent = `${data.items?.length || 0} ${data.kind || "feed"} items`;
+      setStatus("Source ready");
+    }
+
+    async function searchSource() {
+      const query = $("sourceSearch").value.trim();
+      if (!query) throw new Error("Enter a title to search.");
+      setStatus("Searching source");
+      $("sourceStatus").textContent = `Searching ${query}...`;
+      const data = await fetchSourceJson("/api/source/search", { q: query });
+      renderSourceResults(data.items || []);
+      $("sourceStatus").textContent = `${data.items?.length || 0} results for ${data.query}`;
+      setStatus("Source ready");
+    }
+
+    async function openSourceNovel(url) {
+      setStatus("Loading novel");
+      $("sourceStatus").textContent = "Loading novel details...";
+      const data = await fetchSourceJson("/api/source/novel", { url });
+      const chapterCount = data.chapters?.length || 0;
+      $("sourceNovel").innerHTML = `
+        <div class="source-card">
+          <div class="title">${escapeHtml(data.title)}</div>
+          <div class="meta">${escapeHtml([data.author ? `by ${data.author}` : "", `${chapterCount} chapters`, ...(data.tags || []).slice(0, 5)].filter(Boolean).join(" | "))}</div>
+          ${data.summary ? `<div class="summary">${escapeHtml(data.summary)}</div>` : ""}
+        </div>
+        <div class="source-card">
+          ${(data.chapters || []).map((chapter, index) => `
+            <div class="chapter-actions">
+              <div class="chapter-title" title="${escapeHtml(chapter.title)}">${index + 1}. ${escapeHtml(chapter.title)}</div>
+              <button class="ghost load-source-chapter" type="button" data-url="${escapeHtml(chapter.url)}">Load</button>
+              <button class="read-source-chapter" type="button" data-url="${escapeHtml(chapter.url)}">Read</button>
+            </div>
+          `).join("")}
+        </div>
+      `;
+      $("sourceStatus").textContent = `${data.title} loaded`;
+      setStatus("Novel loaded");
+    }
+
+    async function loadSourceChapter(url, readNow = false) {
+      setStatus("Loading chapter");
+      $("sourceStatus").textContent = "Loading chapter text...";
+      const data = await fetchSourceJson("/api/source/chapter", { url });
+      $("source").value = `${data.novel ? `${data.novel}\n` : ""}${data.title}\n\n${data.text}`;
+      state.cache.clear();
+      state.pendingCurrent = 0;
+      buildChunks();
+      $("readerShell").classList.remove("source-mode");
+      $("readTab").classList.add("active");
+      $("sourceTab").classList.remove("active");
+      $("sourceStatus").textContent = `Loaded ${data.title} | ${data.chars.toLocaleString()} chars`;
+      log(`Loaded ${data.source}: ${data.title}\n${data.url}`);
+      setStatus("Chapter loaded");
+      if (readNow) playQueue(0);
+    }
+
     function setVoiceSample(blob, label) {
       state.voiceSample = { blob, label };
       $("voiceSampleStatus").textContent = `${label} | ${(blob.size / 1024).toFixed(1)} KB`;
@@ -876,6 +1050,8 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
         minChars: Number($("minChars").value),
         maxChars: Number($("maxChars").value),
         pauseMode: $("pauseMode").value,
+        sourceProvider: $("sourceProvider").value,
+        sourceFeedKind: $("sourceFeedKind").value,
         autoScroll: $("autoScroll").checked,
         prefetch: $("prefetch").checked,
         cacheAudio: $("cacheAudio").checked
@@ -892,6 +1068,8 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       if (data.minChars !== undefined) $("minChars").value = data.minChars;
       if (data.maxChars) $("maxChars").value = data.maxChars;
       if (data.pauseMode) $("pauseMode").value = data.pauseMode;
+      if (data.sourceProvider) $("sourceProvider").value = data.sourceProvider;
+      if (data.sourceFeedKind) $("sourceFeedKind").value = data.sourceFeedKind;
       if (data.autoScroll !== undefined) $("autoScroll").checked = data.autoScroll;
       if (data.prefetch !== undefined) $("prefetch").checked = data.prefetch;
       if (data.cacheAudio !== undefined) $("cacheAudio").checked = data.cacheAudio;
@@ -1668,6 +1846,54 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
           log(String(error.message || error));
         }
       });
+      $("sourceFeed").addEventListener("click", async () => {
+        try {
+          await loadSourceFeed();
+        } catch (error) {
+          setStatus("Source error");
+          $("sourceStatus").textContent = String(error.message || error);
+          log(String(error.message || error));
+        }
+      });
+      $("sourceSearchBtn").addEventListener("click", async () => {
+        try {
+          await searchSource();
+        } catch (error) {
+          setStatus("Source error");
+          $("sourceStatus").textContent = String(error.message || error);
+          log(String(error.message || error));
+        }
+      });
+      $("sourceSearch").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          $("sourceSearchBtn").click();
+        }
+      });
+      $("sourceResults").addEventListener("click", async (event) => {
+        const node = event.target.closest(".open-source-novel");
+        if (!node) return;
+        try {
+          await openSourceNovel(node.dataset.url);
+        } catch (error) {
+          setStatus("Source error");
+          $("sourceStatus").textContent = String(error.message || error);
+          log(String(error.message || error));
+        }
+      });
+      $("sourceNovel").addEventListener("click", async (event) => {
+        const loadNode = event.target.closest(".load-source-chapter");
+        const readNode = event.target.closest(".read-source-chapter");
+        const node = loadNode || readNode;
+        if (!node) return;
+        try {
+          await loadSourceChapter(node.dataset.url, Boolean(readNode));
+        } catch (error) {
+          setStatus("Source error");
+          $("sourceStatus").textContent = String(error.message || error);
+          log(String(error.message || error));
+        }
+      });
       $("tone").addEventListener("click", testTone);
       $("uploadVoiceAudio").addEventListener("click", () => $("voiceAudioInput").click());
       $("recordMic").addEventListener("click", async () => {
@@ -1749,7 +1975,7 @@ Hello. This reader can use Kokoro or NeuTTS locally. Paste a chapter here, build
       });
       $("addBookmark").addEventListener("click", addBookmark);
       $("clearBookmarks").addEventListener("click", clearActiveBookmarks);
-      ["voice", "language", "speed", "volume", "chunkMode", "minChars", "maxChars", "pauseMode", "autoScroll", "prefetch", "cacheAudio"].forEach((id) => {
+      ["voice", "language", "speed", "volume", "chunkMode", "minChars", "maxChars", "pauseMode", "autoScroll", "prefetch", "cacheAudio", "sourceProvider", "sourceFeedKind"].forEach((id) => {
         $(id).addEventListener("change", savePrefs);
       });
       $("source").addEventListener("input", () => {
