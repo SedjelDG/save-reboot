@@ -638,13 +638,16 @@ def parse_wuxiaworld_detail(page_html: str, url: str) -> dict:
     public_count = wuxiaworld_free_chapter_count(novel, chapter_count)
     public_count = min(chapter_count or public_count, public_count or chapter_count or latest_offset)
 
-    chapters = []
+    anchor_chapters = parse_wuxiaworld_anchor_chapters(page_html, slug)
+    chapters = anchor_chapters if len(anchor_chapters) > 1 else []
     first_slug = str(first.get("slug") or "")
     slug_prefix = ""
     match = re.match(r"^(.*?)(\d+)$", first_slug)
-    if match:
+    if chapters:
+        pass
+    elif match:
         slug_prefix = match.group(1)
-    if slug_prefix and public_count:
+    if not chapters and slug_prefix and public_count:
         for number in range(first_offset, public_count + 1):
             chapter_slug = f"{slug_prefix}{number}"
             if number == first_offset and first.get("name"):
@@ -660,7 +663,7 @@ def parse_wuxiaworld_detail(page_html: str, url: str) -> dict:
                     "date": "",
                 }
             )
-    else:
+    elif not chapters:
         for chapter in (first, latest):
             chapter_slug = chapter.get("slug")
             if not chapter_slug:
@@ -691,13 +694,19 @@ def parse_wuxiaworld_chapter(page_html: str, url: str) -> dict:
     if len(path_parts) < 3:
         raise ValueError("Unsupported WuxiaWorld chapter URL.")
     novel_slug, chapter_slug = path_parts[1], path_parts[2]
-    data = find_wuxiaworld_query(page_html, "chapter", novel_slug, chapter_slug)
-    chapter = data.get("item") if isinstance(data.get("item"), dict) else data
-    pricing = chapter.get("pricingInfo") if isinstance(chapter.get("pricingInfo"), dict) else {}
-    if pricing and pricing.get("isFree") is False:
-        raise ValueError("This WuxiaWorld chapter is not marked free in the public page data.")
+    chapter = {}
+    try:
+        data = find_wuxiaworld_query(page_html, "chapter", novel_slug, chapter_slug)
+        chapter = data.get("item") if isinstance(data.get("item"), dict) else data
+    except ValueError:
+        chapter = {}
     content = str(get_value(chapter.get("content")) or "")
     if not content:
+        content = extract_wuxiaworld_chapter_content_div(page_html)
+    if not content:
+        pricing = chapter.get("pricingInfo") if isinstance(chapter.get("pricingInfo"), dict) else {}
+        if pricing and pricing.get("isFree") is False:
+            raise ValueError("This WuxiaWorld chapter appears locked and did not expose public text.")
         raise ValueError("Could not find public WuxiaWorld chapter content.")
     text = clean_html_text(content)
     if len(text) < 200:
@@ -712,6 +721,31 @@ def parse_wuxiaworld_chapter(page_html: str, url: str) -> dict:
         "text": text,
         "chars": len(text),
     }
+
+
+def parse_wuxiaworld_anchor_chapters(page_html: str, novel_slug: str) -> list[dict]:
+    chapters = []
+    seen = set()
+    pattern = re.compile(r'<a\b(?P<attrs>[^>]*\bhref="(?P<href>/novel/%s/[^"]+)"[^>]*)>(?P<title>.*?)</a>' % re.escape(novel_slug), re.S)
+    for match in pattern.finditer(page_html):
+        href = html.unescape(match.group("href"))
+        if href in seen:
+            continue
+        seen.add(href)
+        title = clean_html_text(match.group("title")) or href.rstrip("/").split("/")[-1]
+        chapters.append(
+            {
+                "title": title,
+                "url": absolutize_url(href, WUXIAWORLD_BASE),
+                "date": "",
+            }
+        )
+    return chapters
+
+
+def extract_wuxiaworld_chapter_content_div(page_html: str) -> str:
+    match = re.search(r'<div[^>]+id=["\']chapter-content["\'][^>]*>(.*?)</div>\s*(?:</div>|<script|<footer)', page_html, re.S | re.I)
+    return match.group(1) if match else ""
 
 
 class KokoroState:
